@@ -1,0 +1,3777 @@
+---
+params:
+  treatment_var: "Compound" #the name of the compound/chemical column in metadata
+  chemical_name: "MyChemical" #This should match the name of the chemical/compound/treatment in the metadata
+  manybmdexpressinputs: "no" #If there are many study ids (e.g., many chemicals) in your larger experiment and more than 1 bmdexpress inputs in RNASeqData folder. "Yes" or "No".
+  species: "species" #One of zebrafish, mouse, human, fatheadminnow, chinesemedaka, rainbowtrout, etc.
+  bmdx_platform_id: "MyPlatformID" #See file bmdx_platforms for list of possible platforms or open the BMDExpress GUI, select File -> Update Annotations to see list of annotation IDs and pull updated annotations... If species is chinese medaka or fatheadmnnow, use danRer11_Ensembl
+  dose: "Dose" #The name of the dose column in metadata
+  onerepperdose: FALSE # Define as TRUE if there is only one sample per dose in the experimental design, otherwise define as FALSE
+  BMD.div.BMDL: 20 # default value of 20
+  BMDU.div.BMDL: 40 # default value of 40
+  BMDU.div.BMD: 20 # default value of 20
+  fitP: 0.1 # For BMD models... default value of 0.1... values great than 0.1 are removed because we don't want to keep "rare" instances. If onerepperdose, set to 0.
+  categoryP: 0.05 # Pvalue for filtering categories... default 0.05. If onerepperdose, set to 1.
+  min_gene: 3 # The minimum number of gene BMDs necessary in a category. Not lower than 3. Default 3.  If reduced transcriptome lower to 1.
+  min_level: 5 # The minimum GO level to consider. Levels below are removed.
+  min_dense: 0.06  # minimum probability density to be considered a "mode"
+  min_bw: 0.015 # minimum bandwidth (too much resolution gives strange "peaks")
+  bwFun: "SJ" # choose nrd0 or SJ. the "bandwidth" function to use to determine modes. I've selected the Sheather & Jones (1991) method. see: https://www.ncbi.nlm.nih.gov/pubmed/24885339
+  lcrdratiocut: 1.778279 #1/4 log10 (10^.25) - Default 1.778279. Or 1/4log2 (2^.25) if log2 scale - 1.189207
+  logtransformationscale: 10 #enter the base value of the desired logtransformation, e.g., 2, 10, etc.
+  executeBMDExpress3: FALSE #TRUE or FALSE
+  threads: 6 #Number of threads to use for BMDExpress
+title: "BMDExpress3 and tPOD Calculation"
+subtitle: "`r paste('Treatment:', params$chemical_name, '<br>BMDExpress Plaform:', params$bmdx_platform_id)`"
+author: "Jory Curry"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    code_folding: hide
+    theme: spacelab           # flatly spacelab sandstone cerulean
+    code_download: true
+---
+
+To explore individual gene dose-response models and raw input data, open the .bm2 file in BMDExpress, navigate the the BMD analysis drop down, apply filters, and click on the Probe ID to pull up the plot. Un-check the 'Mean & Std dev' button to view just the input data without the mean and std dev.
+
+***
+
+# Revision History
+
+**This version**  
+  
+*Current version: 1*  
+Date report generated: `r format(Sys.time(), '%d %B, %Y')`  
+Report prepared for: tPOD curation team  
+Purpose of report: Calculate tPODs
+
+* Exercise to analyze RNA-Seq data  
+
+**Previous revisions**  
+
+N/A  
+
+***
+
+# Code setup, Data Loading
+
+This report is meant to calculate tPODs from the outputs of the command-line version of BMDExpress3.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+startTime <- Sys.time()
+```
+
+## Loading libraries
+
+```{r libraries_and_functions, include=FALSE, warning=FALSE, message=FALSE}
+####Libraries####
+directory_path <- getwd() #There has to be a better way to do this
+library(Rfast)
+library(tidyverse)
+library(purrr)
+library(knitr)
+library(kableExtra)
+library(sessioninfo)
+library(jsonlite)
+library(vtree)
+library(data.table)
+source(normalizePath(
+  file.path(directory_path, "Functions", "BMDExpressFunctions.R")
+))
+source(normalizePath(file.path(
+  directory_path, "Functions", "mode_antimode.R"
+)))
+source(normalizePath(
+  file.path(directory_path, "Functions", "Bootstrapping_Functions.R")
+))
+
+n_bmdexpress_input_files <-
+  length(list.files(path = normalizePath(
+    file.path(directory_path, "RNASeqData", "DESeq2_and_log2_norm_counts")
+  )))
+
+if (n_bmdexpress_input_files > 1 &
+    (
+      params$manybmdexpressinputs == "Yes" |
+      params$manybmdexpressinputs == "yes" |
+      params$manybmdexpressinputs == "TRUE" |
+      params$manybmdexpressinputs == "true"
+    )) {
+  append_chemname <- TRUE
+} else {
+  append_chemname <- FALSE
+}
+
+species <- params$species
+envspecies <- species %in% c("chinesemedaka", "fatheadminnow", "rainbowtrout")
+bmdexpresssupportedspecies <- species %in% c("zebrafish", "mouse", "rat", "human", "hamster", "dog", "fruitfly")
+```
+
+## Converting Ensembl IDs to Entrez IDs/zebrafish orthologs for ecological species to facilitate category analysis (i.e., rainbow trout, fathead minnow, chinese medaka)
+```{r Ensemble_to_entrrez, include=TRUE, warning=FALSE, message=TRUE, eval=envspecies}
+#These are static annotations made by 'Create_local_annotations_script.R' that live in my OneDrive...
+# File contents is as follows:
+# library('AnnotationHub')
+# library('biomaRt')
+# library(GenomicFeatures)
+# library(rtracklayer)
+# library(rentrez)
+# library(dplyr)
+# library(readr)
+# library(httr)
+# library(purrr)
+# library(furrr)
+# library(jsonlite)
+# setAnnotationHubOption("ASK", FALSE)
+# source(file = "C:/Users/curryj/OneDrive - EC-EC/Desktop/tPOD_Curation_Project/tPOD_curation/Handy_scripts/OrthoDBFunctions.R")
+# 
+# #############################################
+# #############
+# # Mouse #
+# #############
+# ensembl_species <- "mmusculus_gene_ensembl"
+# species_gene_symbol <- "mgi_symbol"
+# 
+# #############
+# # Zebrafish #
+# #############
+# ensembl_species <- "drerio_gene_ensembl"
+# species_gene_symbol <- "external_gene_name"
+# 
+# #################
+# # Rainbow trout #
+# #################
+# #rainbowtrout
+# ensembl_species <- "omykiss_gene_ensembl"
+# species_gene_symbol <- "external_gene_name"
+# 
+# ##################
+# # Chinese Medaka #
+# ##################
+# #chinesemedaka
+# ensembl_species <- "osinensis_gene_ensembl"
+# species_gene_symbol <- "external_gene_name"
+# 
+# ##################
+# # Fathead Minnow #
+# ##################
+# #fatheadminnow
+# ensembl_species <- "pimephales_promelas_gene_ensembl"
+# species_gene_symbol <- "external_gene_name"
+# #############################################
+# 
+# species <- if_else(
+#   ensembl_species == "drerio_gene_ensembl",
+#   "zebrafish",
+#   if_else(
+#     ensembl_species == "omykiss_gene_ensembl",
+#     "rainbowtrout",
+#     if_else(
+#       ensembl_species == "osinensis_gene_ensembl",
+#       "chinesemedaka",
+#       if_else(
+#         ensembl_species == "pimephales_promelas_gene_ensembl",
+#         "fatheadminnow",
+#         if_else(
+#           ensembl_species == "mmusculus_gene_ensembl",
+#           "mouse",
+#           NA
+#         )
+#       )
+#     )
+#   )
+# )
+# biomart_filter <- "ensembl_gene_id"
+# 
+# #Note - useMart() will not work for Fathead Minnow
+# 
+# if (!species %in% c("fatheadminnow")) {
+#   ensembl <- useMart("ensembl", dataset = ensembl_species,  host = "https://useast.ensembl.org") #West is no longer working
+#   attributes <- listAttributes(ensembl)
+#   #all_ensembl <- useMart("ensembl")
+#   #all_datasets <- listDatasets(all_ensembl)
+# }
+# 
+# # Example generic gene IDs (for testing purposes)
+# #genes <- c("ENSDARG00000000001", "ENSDARG00000000002", "ENSDARG00000000003", "ENSDARG00000000018", "ENSDARG00000000019", "ENSDARG00000000068", "ENSDARG00000000069", "ENSOMYG00000042616", "ENSOMYG00000042616", "ENSOMYG00000042617", "ENSOMYG00000042618", "ENSOSIG00000001234", "ENSOSIG00000005678", "ENSOSIG00000009123", "ENSPPRG00000012345", "ENSPPRG00000067890", "ENSPPRG00000011223")
+# #genes <- lapply(resListAll,
+# #                function(x) row.names(as.data.frame(x)))
+# #genes <- unlist(genes) %>% unique()
+# 
+# if (species %in% c("zebrafish", "hamster", "rat", "mouse", "human")) {
+#   ############################################################
+#   ### Zebrafish, Rainbow trout, Hamster, Rat, Mouse, Human ###
+#   ############################################################
+#   
+#   if (species == "zebrafish") {
+#     # Path to your local GFF/GTF file
+#     gtf_file <- "C:/Users/curryj/OneDrive - EC-EC/Desktop/tPOD_Curation_Project/tPOD_curation/annotationfiles/Danio_rerio.GRCz11.111.gtf"
+#   } else if (species == "mouse") {
+#     gtf_file <- "C:/Users/curryj/OneDrive - EC-EC/Desktop/tPOD_Curation_Project/tPOD_curation/annotationfiles/Mus_musculus.GRCm39.112.gtf"
+#   } else {
+#     stop("No gtf annotation files in directory... please download")
+#   }
+#   
+#   # Import the GFF/GTF file
+#   annotations <- import(gtf_file)
+#   
+#   # Convert annotations to a data frame
+#   annotations_df <- as.data.frame(annotations) %>%
+#     mutate(prefix = sub("_.*", "", transcript_id))
+#   
+#   #Count occurences of each prefix
+#   prefix_counts <- annotations %>%
+#     group_by(prefix) %>%
+#     summarize(count = n())
+#   
+#   genes <- annotations_df %>%
+#     dplyr::pull(gene_id) %>%
+#     unique()
+#   
+#   id_table_entrez <- getBM(
+#     filters = biomart_filter,
+#     attributes = c(
+#       biomart_filter,
+#       species_gene_symbol,
+#       "description",
+#       "entrezgene_id",
+#       "entrezgene_accession"
+#     ),
+#     values = genes, #genes/all the genes in the genome
+#     mart = ensembl
+#   )
+#   
+#   if (species == "zebrafish") {
+#     readr::write_csv(id_table_entrez, "C:/Users/curryj/OneDrive - EC-EC/Desktop/tPOD_Curation_Project/tPOD_curation/annotationfiles/zebrafish_annotated_id_table_entrez_wholegenome.csv")    
+#   } else if (species == "mouse") {
+#     readr::write_csv(id_table_entrez, "C:/Users/curryj/OneDrive - EC-EC/Desktop/tPOD_Curation_Project/tPOD_curation/annotationfiles/mouse_annotated_id_table_entrez_wholegenome.csv") 
+#   } else {
+#     print("No files written")
+#   }
+# 
+# } else if (species %in% c("chinesemedaka")) {
+#   ######################
+#   ### Chinese Medaka ###
+#   ######################
+#   
+#   ## Get zebrafish homolog genes ##
+#   
+#   if (species == "chinesemedaka") {
+#     # Path to your local GFF/GTF file
+#     gtf_file <- "C:/Users/curryj/OneDrive - EC-EC/Desktop/tPOD_Curation_Project/tPOD_curation/annotationfiles/Oryzias_sinensis.ASM858656v1.112.gtf"
+#   }
+#   
+#   # Import the GFF/GTF file
+#   annotations <- import(gtf_file)
+#   
+#   # Convert annotations to a data frame
+#   annotations_df <- as.data.frame(annotations)
+#   
+#   genes <- annotations_df %>%
+#     dplyr::pull(gene_id) %>%
+#     unique()
+#   
+#   id_table_entrez <- getBM(filters = biomart_filter,
+#                            attributes = c(biomart_filter,
+#                                           species_gene_symbol,
+#                                           "description",
+#                                           #"zfin_id_id",
+#                                           #"zfin_id_symbol",
+#                                           "drerio_homolog_ensembl_gene",
+#                                           "drerio_homolog_associated_gene_name"),
+#                            values = genes,
+#                            mart = ensembl)
+#   
+#   if (species == "chinesemedaka") {
+#     readr::write_csv(id_table_entrez, "C:/Users/curryj/OneDrive - EC-EC/Desktop/tPOD_Curation_Project/tPOD_curation/annotationfiles/chinesemedaka_annotated_id_table_entrez_wholegenome.csv")
+#   } 
+#   
+# } else if (species %in% c("fatheadminnow", "rainbowtrout")) {
+# 
+#   if (species == "fatheadminnow") {
+#     ######################
+#     ### Fathead Minnow ###
+#     ######################
+#     # Path to your local GFF/GTF file
+#     gtf_file <-
+#       "C:/Users/curryj/OneDrive - EC-EC/Desktop/tPOD_Curation_Project/tPOD_curation/annotationfiles/FHM_genomic.gtf"
+#   } else if (species == "rainbowtrout") {
+#     #####################
+#     ### Rainbow trout ###
+#     #####################
+#     # Path to your local GFF/GTF file
+#     gtf_file <-
+#       "C:/Users/curryj/OneDrive - EC-EC/Desktop/tPOD_Curation_Project/tPOD_curation/annotationfiles/Oncorhynchus_mykiss.USDA_OmykA_1.1.112.gtf"
+#   }
+#   
+#   if (species == "fatheadminnow") {
+#     ######################
+#     ### Fathead Minnow ###
+#     ######################
+#     
+#     #Note: No BioMart is available so all information is strictly from the .gtf file and BLAST
+#     
+#     # Import the GFF/GTF file
+#     annotations <- import(gtf_file)
+#     
+#     # Convert annotations to a data frame
+#     annotations_df <- as.data.frame(annotations)
+#     
+#     # Extract product information for transcripts and exons
+#     transcript_exon_products <- annotations_df %>%
+#       dplyr::filter(type %in% c("transcript", "exon", "CDS", "start_codon", "stop_codon")) %>%
+#       dplyr::select(gene_id, product, transcript_id) %>%
+#       dplyr::filter(!is.na(product)) %>%
+#       dplyr::distinct()
+#     
+#     # Aggregate product information at the gene level
+#     gene_products <- transcript_exon_products %>%
+#       dplyr::group_by(gene_id, transcript_id) %>%
+#       dplyr::summarize(product = paste(unique(product), collapse = "; "), .groups = 'drop')
+#     
+#     # Add product information to gene annotations
+#     df <- annotations_df %>%
+#       dplyr::left_join(gene_products, by = "gene_id") %>%
+#       dplyr::mutate(product = dplyr::coalesce(product.y, product.x)) %>%
+#       dplyr::mutate(transcript_id = dplyr::coalesce(transcript_id.y, transcript_id.x)) %>%
+#       dplyr::select(-product.x, -product.y, -transcript_id.y, -transcript_id.x)
+#     
+#     # Filter for genes and select relevant columns
+#     gene_annotations_df <- df %>%
+#       dplyr::filter(type == "gene") %>%
+#       dplyr::select(seqnames, start, end, strand, gene_id, transcript_id, db_xref, product)
+#     
+#     annotations_df <- gene_annotations_df %>%
+#       dplyr::mutate(ensembl_gene_id = gsub("GeneID:", "", db_xref)) %>%
+#       dplyr::mutate(entrezgene_id = ensembl_gene_id) %>%
+#       dplyr::mutate(external_gene_name = gene_id) %>%
+#       dplyr::mutate(entrezgene_accession = gene_id) %>%
+#       dplyr::mutate(prefix = sub("_.*", "", transcript_id)) %>%
+#       dplyr::rename(query_id = transcript_id) %>%
+#       dplyr::rename(description = product) %>%
+#       dplyr::select(ensembl_gene_id, external_gene_name, description, entrezgene_id, entrezgene_accession, query_id, prefix)
+#     
+#     ################
+#     # OrgDB method #
+#     ################
+#     
+#     # Add a new column to store RefSeq zebrafish orthologs
+#     #annotations_df$zebrafish_refseq <- NA
+#     
+#     # Loop over each row to get RefSeq IDs
+#     #for (i in 1:nrow(annotations_df)) {
+#     #  entrez_id <- annotations_df$entrezgene_id[i]
+#     #  refseq_ids <- tryCatch({
+#     #    get_all_refseq_ids(entrez_id)
+#     #  }, error = function(e) {
+#     #    message("Error with Entrez ID: ", entrez_id)
+#     #    return(NA)
+#     #  })
+#     
+#     # Add the RefSeq ID to the dataframe, if any are found
+#     #  if (length(refseq_ids) > 0) {
+#     #    annotations_df$zebrafish_refseq[i] <- paste(refseq_ids, collapse = "; ")
+#     #  }
+#     #}
+#     
+#     ##########################
+#     # Preferred BLAST method #
+#     ##########################
+#     
+#     # In linux terminal:
+#     
+#     # Download and install blast+
+#     # sudo apt-get install ncbi-blast+
+#     
+#     # Download the Zebrafish transcript FASTA and FHM Transcript FASTA
+#     
+#     # Create a blast database for zebrafish
+#     # makeblastdb -in danRer11.rna.fna -dbtype nucl -out zebrafish_nucletoide_db
+#     
+#     # Run Blastn
+#     # blastn -query fathead_minnow_nucleotides.fna -db zebrafish_nucleotide_db -outfmt 6 -out blastn_results.txt
+#     # -oufmt 6 =  tab delimited
+#     
+#     # blast_results <-
+#     #   read.table("FHM_ZF_blastn_results.txt",
+#     #              header = FALSE,
+#     #              sep = "\t")
+#     # colnames(blast_results) <-
+#     #   c(
+#     #     "query_id",
+#     #     "subject_id",
+#     #     "percent_identity",
+#     #     "alignment_length",
+#     #     "mismatches",
+#     #     "gap_opens",
+#     #     "q_start",
+#     #     "q_end",
+#     #     "s_start",
+#     #     "s_end",
+#     #     "evalue",
+#     #     "bit_score"
+#     #   )
+#     # 
+#     # # Remove version numbers
+#     # blast_results$Subject_ID <-
+#     #   gsub("\\..*", "", blast_results$subject_id)
+#     # 
+#     # # Extract the prefixes (first 2 characters before '_')
+#     # blast_results <- blast_results %>%
+#     #   mutate(prefix = sub("_.*", "", Subject_ID))
+#     # blast_results <- blast_results %>%
+#     #   mutate(prefix_query = sub("_.*", "", query_id))
+#     # 
+#     # # Count the occurrences of each prefix
+#     # prefix_counts <- blast_results %>%
+#     #   group_by(prefix) %>%
+#     #   summarize(count = n())
+#     # prefix_counts_query <- blast_results %>%
+#     #   group_by(prefix_query) %>%
+#     #   summarize(count = n())
+#     # 
+#     # # Display the counts
+#     # print(prefix_counts)
+#     # print(prefix_counts_query)
+#     # 
+#     # # Split by RefSeq type
+#     # nm_ids <-
+#     #   blast_results[grep("^NM_", blast_results$Subject_ID), "Subject_ID"] #Manually curated mRNA sequences for protein-coding genes.
+#     # nr_ids <-
+#     #   blast_results[grep("^NR_", blast_results$Subject_ID), "Subject_ID"] #Manually curated non-coding RNA sequences, such as rRNA, tRNA, or other regulatory RNAs
+#     # xm_ids <-
+#     #   blast_results[grep("^XM_", blast_results$Subject_ID), "Subject_ID"] #Computationally predicted mRNA sequences for protein-coding genes
+#     # xr_ids <-
+#     #   blast_results[grep("^XR_", blast_results$Subject_ID), "Subject_ID"] #Computationally predicted non-coding RNA sequences
+#     # 
+#     # #Connect to Ensembl
+#     # ensembl <- useMart("ensembl", dataset = "drerio_gene_ensembl")
+#     # 
+#     # attributes <- listAttributes(ensembl)
+#     # 
+#     # # Retrieve annotations for each type
+#     # nm_annotations <-
+#     #   getBM(
+#     #     attributes = c('refseq_mrna', 'ensembl_gene_id', 'external_gene_name'),
+#     #     filters = 'refseq_mrna',
+#     #     values = nm_ids,
+#     #     mart = ensembl
+#     #   )
+#     # nm_annotations <- nm_annotations %>%
+#     #   rename(subject_id = 'refseq_mrna')
+#     # 
+#     # nr_annotations <-
+#     #   getBM(
+#     #     attributes = c('refseq_ncrna', 'ensembl_gene_id', 'external_gene_name'),
+#     #     filters = 'refseq_ncrna',
+#     #     values = nm_ids,
+#     #     mart = ensembl
+#     #   )
+#     # nr_annotations <- nr_annotations %>%
+#     #   rename(subject_id = 'refseq_ncrna')
+#     # 
+#     # xm_annotations <-
+#     #   getBM(
+#     #     attributes = c(
+#     #       'refseq_mrna_predicted',
+#     #       'ensembl_gene_id',
+#     #       'external_gene_name'
+#     #     ),
+#     #     filters = 'refseq_mrna_predicted',
+#     #     values = xm_ids,
+#     #     mart = ensembl
+#     #   )
+#     # xm_annotations <- xm_annotations %>%
+#     #   rename(subject_id = 'refseq_mrna_predicted')
+#     # 
+#     # xr_annotations <-
+#     #   getBM(
+#     #     attributes = c(
+#     #       'refseq_ncrna_predicted',
+#     #       'ensembl_gene_id',
+#     #       'external_gene_name'
+#     #     ),
+#     #     filters = 'refseq_ncrna_predicted',
+#     #     values = xr_ids,
+#     #     mart = ensembl
+#     #   )
+#     # xr_annotations <- xr_annotations %>%
+#     #   rename(subject_id = 'refseq_ncrna_predicted')
+#     # 
+#     # # Combine all annotations
+#     # annotations <-
+#     #   rbind(nm_annotations,
+#     #         nr_annotations,
+#     #         xm_annotations,
+#     #         xr_annotations)
+#     # 
+#     # # Merge with original BLAST results
+#     # annotated_results <-
+#     #   merge(
+#     #     blast_results,
+#     #     annotations,
+#     #     by.x = "Subject_ID",
+#     #     by.y = "subject_id",
+#     #     all.x = TRUE
+#     #   ) %>% distinct()
+#     # 
+#     # write_tsv(annotated_results, file = "Annotated_FHM_genes_with_ZF_homologs.txt")
+#     # 
+#     # #annotated_results <- readr::read_tsv("Annotated_FHM_genes_with_ZF_homologs.txt")
+#     # 
+#     # ranked_annotated_results <- annotated_results %>%
+#     #   dplyr::group_by(query_id) %>%
+#     #   dplyr::mutate(
+#     #     evalue_rank = rank(evalue, ties.method = "min"),
+#     #     identity_rank = rank(-percent_identity, ties.method = "min"),
+#     #     bit_score_rank = rank(-bit_score, ties.method = "min"),
+#     #     combined_rank = evalue_rank + identity_rank + bit_score_rank
+#     #   ) %>%
+#     #   dplyr::ungroup()
+#     # 
+#     # # Function to get the best non-NA or the best-ranked NA entry
+#     # get_best_annotation <- function(data) {
+#     #   # Check if there is any non-NA ensembl_gene_id
+#     #   if (any(!is.na(data$ensembl_gene_id))) {
+#     #     # Select the best non-NA ensembl_gene_id
+#     #     data %>%
+#     #       filter(!is.na(ensembl_gene_id)) %>%
+#     #       arrange(combined_rank) %>%
+#     #       slice(1)
+#     #   } else {
+#     #     # If all are NA, select the best-ranked entry
+#     #     data %>%
+#     #       arrange(combined_rank) %>%
+#     #       slice(1)
+#     #   }
+#     # }
+#     # 
+#     # # Apply the function across all query_ids
+#     # best_annotated_results <- ranked_annotated_results %>%
+#     #   dplyr::group_by(query_id) %>%
+#     #   group_modify( ~ get_best_annotation(.x)) %>%
+#     #   ungroup()
+#     # 
+#     # summarized_annotated_results <-
+#     #   best_annotated_results %>% dplyr::select(Subject_ID,
+#     #                                            subject_id,
+#     #                                            query_id,
+#     #                                            ensembl_gene_id,
+#     #                                            external_gene_name,
+#     #                                            prefix) %>% distinct()
+#     # 
+#     # write_tsv(summarized_annotated_results, file = "summarized_annotated_results_FHM_with_ZF_homologs.txt")
+#     # 
+#     
+#     summarized_annotated_results <- readr::read_tsv("summarized_annotated_results_FHM_with_ZF_homologs.txt")
+#     
+#     zf_homolog_annotated_results <- summarized_annotated_results %>%
+#       dplyr::mutate(prefix_query = sub("_.*", "", query_id)) %>%
+#       dplyr::filter(prefix_query %in% c("XM", "XR")) %>%
+#       dplyr::left_join(annotations_df, by = "query_id") %>%
+#       dplyr::select(ensembl_gene_id.x, external_gene_name.x, description, entrezgene_id, entrezgene_accession, query_id) %>%
+#       dplyr::rename(ensembl_gene_id = ensembl_gene_id.x, external_gene_name = external_gene_name.x)
+#     
+#     # Print the updated dataframe
+#     print(zf_homolog_annotated_results)
+#   }
+#   else if (species == "rainbowtrout") {
+#     #####################
+#     ### Rainbow trout ###
+#     #####################
+#     
+#     #Note: BioMart is now available!
+#     
+#     # Import the GFF/GTF file
+#     annotations <- import(gtf_file)
+#     
+#     # Convert annotations to a data frame
+#     annotations_df <- as.data.frame(annotations)
+#     
+#     genes <- annotations_df %>%
+#       dplyr::pull(gene_id) %>%
+#       unique()
+#     
+#     id_table_entrez <- getBM(filters = biomart_filter,
+#                              attributes = c(biomart_filter,
+#                                             species_gene_symbol,
+#                                             "description",
+#                                             #"zfin_id_id",
+#                                             #"zfin_id_symbol",
+#                                             "drerio_homolog_ensembl_gene",
+#                                             "drerio_homolog_associated_gene_name"),
+#                              values = genes,
+#                              mart = ensembl)
+#     
+#     # # Extract product information for transcripts and exons
+#     # transcript_exon_products <- annotations_df %>%
+#     #   dplyr::filter(type %in% c("transcript", "exon", "CDS", "start_codon", "stop_codon")) %>%
+#     #   dplyr::select(gene_id, product, transcript_id) %>%
+#     #   dplyr::filter(!is.na(product)) %>%
+#     #   dplyr::distinct()
+#     # 
+#     # # Aggregate product information at the gene level
+#     # gene_products <- transcript_exon_products %>%
+#     #   dplyr::group_by(gene_id, transcript_id) %>%
+#     #   dplyr::summarize(product = paste(unique(product), collapse = "; "), .groups = 'drop')
+#     # 
+#     # # Add product information to gene annotations
+#     # df <- annotations_df %>%
+#     #   dplyr::left_join(gene_products, by = "gene_id") %>%
+#     #   dplyr::mutate(product = dplyr::coalesce(product.y, product.x)) %>%
+#     #   dplyr::mutate(transcript_id = dplyr::coalesce(transcript_id.y, transcript_id.x)) %>%
+#     #   dplyr::select(-product.x, -product.y, -transcript_id.y, -transcript_id.x)
+#     # 
+#     # # Filter for genes and select relevant columns
+#     # gene_annotations_df <- df %>%
+#     #   dplyr::filter(type == "gene") %>%
+#     #   dplyr::select(seqnames, start, end, strand, gene_id, transcript_id, db_xref, product)
+#     # 
+#     # annotations_df <- gene_annotations_df %>%
+#     #   dplyr::mutate(ensembl_gene_id = gsub("GeneID:", "", db_xref)) %>%
+#     #   dplyr::mutate(entrezgene_id = ensembl_gene_id) %>%
+#     #   dplyr::mutate(external_gene_name = gene_id) %>%
+#     #   dplyr::mutate(entrezgene_accession = gene_id) %>%
+#     #   dplyr::mutate(prefix = sub("_.*", "", transcript_id)) %>%
+#     #   dplyr::rename(query_id = transcript_id) %>%
+#     #   dplyr::rename(description = product) %>%
+#     #   dplyr::select(ensembl_gene_id, external_gene_name, description, entrezgene_id, entrezgene_accession, query_id, prefix)
+#     
+#     ################
+#     # OrgDB method #
+#     ################
+#     
+#     # Add a new column to store RefSeq zebrafish orthologs
+#     #annotations_df$zebrafish_refseq <- NA
+#     
+#     # Loop over each row to get RefSeq IDs
+#     #for (i in 1:nrow(annotations_df)) {
+#     #  entrez_id <- annotations_df$entrezgene_id[i]
+#     #  refseq_ids <- tryCatch({
+#     #    get_all_refseq_ids(entrez_id)
+#     #  }, error = function(e) {
+#     #    message("Error with Entrez ID: ", entrez_id)
+#     #    return(NA)
+#     #  })
+#     
+#     # Add the RefSeq ID to the dataframe, if any are found
+#     #  if (length(refseq_ids) > 0) {
+#     #    annotations_df$zebrafish_refseq[i] <- paste(refseq_ids, collapse = "; ")
+#     #  }
+#     #}
+#     
+#     ##########################
+#     # Preferred BLAST method #
+#     ##########################
+#     
+#     # In linux terminal:
+#     
+#     # Download and install blast+
+#     # sudo apt-get install ncbi-blast+
+#     
+#     # Download the Zebrafish transcript FASTA and FHM Transcript FASTA
+#     
+#     # Create a blast database for zebrafish
+#     # makeblastdb -in danRer11.rna.fna -dbtype nucl -out zebrafish_nucletoide_db
+#     
+#     # Run Blastn
+#     # blastn -query fathead_minnow_nucleotides.fna -db zebrafish_nucleotide_db -outfmt 6 -out blastn_results.txt
+#     # -oufmt 6 =  tab delimited
+#     
+#     # # Install and load biomaRt
+#     # if (!requireNamespace("biomaRt", quietly = TRUE)) {
+#     #   BiocManager::install("biomaRt")
+#     # }
+#     # library(biomaRt)
+#     # library(tidyverse)
+#     # blast_results <-
+#     #   read.table("RT_ZF_blastn_results.txt",
+#     #              header = FALSE,
+#     #              sep = "\t")
+#     # colnames(blast_results) <-
+#     #   c(
+#     #     "query_id",
+#     #     "subject_id",
+#     #     "percent_identity",
+#     #     "alignment_length",
+#     #     "mismatches",
+#     #     "gap_opens",
+#     #     "q_start",
+#     #     "q_end",
+#     #     "s_start",
+#     #     "s_end",
+#     #     "evalue",
+#     #     "bit_score"
+#     #   )
+#     # 
+#     # # Remove version numbers
+#     # blast_results$Subject_ID <-
+#     #   gsub("\\..*", "", blast_results$subject_id)
+#     # 
+#     # # Extract the prefixes (first 2 characters before '_')
+#     # blast_results <- blast_results %>%
+#     #   mutate(prefix = sub("_.*", "", Subject_ID))
+#     # blast_results <- blast_results %>%
+#     #   mutate(prefix_query = sub("_.*", "", query_id))
+#     # 
+#     # # Count the occurrences of each prefix
+#     # prefix_counts <- blast_results %>%
+#     #   group_by(prefix) %>%
+#     #   summarize(count = n())
+#     # prefix_counts_query <- blast_results %>%
+#     #   group_by(prefix_query) %>%
+#     #   summarize(count = n())
+#     # 
+#     # # Display the counts
+#     # print(prefix_counts)
+#     # print(prefix_counts_query)
+#     # 
+#     # # Split by RefSeq type
+#     # nm_ids <-
+#     #   blast_results[grep("^NM_", blast_results$Subject_ID), "Subject_ID"] #Manually curated mRNA sequences for protein-coding genes.
+#     # nr_ids <-
+#     #   blast_results[grep("^NR_", blast_results$Subject_ID), "Subject_ID"] #Manually curated non-coding RNA sequences, such as rRNA, tRNA, or other regulatory RNAs
+#     # xm_ids <-
+#     #   blast_results[grep("^XM_", blast_results$Subject_ID), "Subject_ID"] #Computationally predicted mRNA sequences for protein-coding genes
+#     # xr_ids <-
+#     #   blast_results[grep("^XR_", blast_results$Subject_ID), "Subject_ID"] #Computationally predicted non-coding RNA sequences
+#     # 
+#     # #Connect to Ensembl
+#     # ensembl <- useMart("ensembl", dataset = "drerio_gene_ensembl")
+#     # 
+#     # #attributes <- listAttributes(ensembl)
+#     # 
+#     # # Retrieve annotations for each type
+#     # nm_annotations <-
+#     #   getBM(
+#     #     attributes = c('refseq_mrna', 'ensembl_gene_id', 'external_gene_name'),
+#     #     filters = 'refseq_mrna',
+#     #     values = nm_ids,
+#     #     mart = ensembl
+#     #   )
+#     # nm_annotations <- nm_annotations %>%
+#     #   rename(subject_id = 'refseq_mrna')
+#     # 
+#     # nr_annotations <-
+#     #   getBM(
+#     #     attributes = c('refseq_ncrna', 'ensembl_gene_id', 'external_gene_name'),
+#     #     filters = 'refseq_ncrna',
+#     #     values = nm_ids,
+#     #     mart = ensembl
+#     #   )
+#     # nr_annotations <- nr_annotations %>%
+#     #   rename(subject_id = 'refseq_ncrna')
+#     # 
+#     # xm_annotations <-
+#     #   getBM(
+#     #     attributes = c(
+#     #       'refseq_mrna_predicted',
+#     #       'ensembl_gene_id',
+#     #       'external_gene_name'
+#     #     ),
+#     #     filters = 'refseq_mrna_predicted',
+#     #     values = xm_ids,
+#     #     mart = ensembl
+#     #   )
+#     # xm_annotations <- xm_annotations %>%
+#     #   rename(subject_id = 'refseq_mrna_predicted')
+#     # 
+#     # xr_annotations <-
+#     #   getBM(
+#     #     attributes = c(
+#     #       'refseq_ncrna_predicted',
+#     #       'ensembl_gene_id',
+#     #       'external_gene_name'
+#     #     ),
+#     #     filters = 'refseq_ncrna_predicted',
+#     #     values = xr_ids,
+#     #     mart = ensembl
+#     #   )
+#     # xr_annotations <- xr_annotations %>%
+#     #   rename(subject_id = 'refseq_ncrna_predicted')
+#     # 
+#     # # Combine all annotations
+#     # annotations <-
+#     #   rbind(nm_annotations,
+#     #         nr_annotations,
+#     #         xm_annotations,
+#     #         xr_annotations)
+#     # 
+#     # # Merge with original BLAST results
+#     # annotated_results <-
+#     #   merge(
+#     #     blast_results,
+#     #     annotations,
+#     #     by.x = "Subject_ID",
+#     #     by.y = "subject_id",
+#     #     all.x = TRUE
+#     #   ) %>% distinct()
+#     # 
+#     # write_tsv(annotated_results, file = "Annotated_RT_genes_with_ZF_homologs.txt")
+#     # 
+#     # annotated_results <-
+#     #   readr::read_tsv("Annotated_RT_genes_with_ZF_homologs.txt")
+#     # 
+#     # ranked_annotated_results <- annotated_results %>%
+#     #   dplyr::group_by(query_id) %>%
+#     #   dplyr::mutate(
+#     #     evalue_rank = rank(evalue, ties.method = "min"),
+#     #     identity_rank = rank(-percent_identity, ties.method = "min"),
+#     #     bit_score_rank = rank(-bit_score, ties.method = "min"),
+#     #     combined_rank = evalue_rank + identity_rank + bit_score_rank
+#     #   ) %>%
+#     #   dplyr::ungroup()
+#     # 
+#     # # Function to get the best non-NA or the best-ranked NA entry
+#     # get_best_annotation <- function(data) {
+#     #   # Check if there is any non-NA ensembl_gene_id
+#     #   if (any(!is.na(data$ensembl_gene_id))) {
+#     #     # Select the best non-NA ensembl_gene_id
+#     #     data %>%
+#     #       filter(!is.na(ensembl_gene_id)) %>%
+#     #       arrange(combined_rank) %>%
+#     #       slice(1)
+#     #   } else {
+#     #     # If all are NA, select the best-ranked entry
+#     #     data %>%
+#     #       arrange(combined_rank) %>%
+#     #       slice(1)
+#     #   }
+#     # }
+#     # 
+#     # # Apply the function across all query_ids
+#     # best_annotated_results <- ranked_annotated_results %>%
+#     #   dplyr::group_by(query_id) %>%
+#     #   group_modify( ~ get_best_annotation(.x)) %>%
+#     #   ungroup()
+#     # 
+#     # summarized_annotated_results <-
+#     #   best_annotated_results %>% dplyr::select(Subject_ID,
+#     #                                            subject_id,
+#     #                                            query_id,
+#     #                                            ensembl_gene_id,
+#     #                                            external_gene_name,
+#     #                                            prefix) %>% distinct()
+#     # 
+#     # write_tsv(summarized_annotated_results, file = "summarized_annotated_results_RT_with_ZF_homologs.txt")
+#     
+#     # summarized_annotated_results <- readr::read_tsv("summarized_annotated_results_RT_with_ZF_homologs.txt")
+#     # 
+#     # zf_homolog_annotated_results <- summarized_annotated_results %>%
+#     #   dplyr::mutate(prefix_query = sub("_.*", "", query_id)) %>%
+#     #   dplyr::filter(prefix_query %in% c("XM", "XR")) %>%
+#     #   dplyr::left_join(id_table_entrez, by = "query_id") %>%
+#     #   dplyr::select(ensembl_gene_id.x, external_gene_name.x, description, entrezgene_id, entrezgene_accession, query_id) %>%
+#     #   dplyr::rename(ensembl_gene_id = ensembl_gene_id.x, external_gene_name = external_gene_name.x)
+#     print(id_table_entrez)
+#   }
+#   
+#   if (species == "fatheadminnow") {
+#     readr::write_csv(
+#       zf_homolog_annotated_results,
+#       "C:/Users/curryj/OneDrive - EC-EC/Desktop/tPOD_Curation_Project/tPOD_curation/annotationfiles/fatheadminnow_annotated_id_table_entrez_wholegenome.csv"
+#     )
+#   } else if (species == "rainbowtrout") {
+#     readr::write_csv(
+#       id_table_entrez,
+#       "C:/Users/curryj/OneDrive - EC-EC/Desktop/tPOD_Curation_Project/tPOD_curation/annotationfiles/rainbowtrout_annotated_id_table_entrez_wholegenome.csv"
+#     )
+#   }
+# }
+
+
+
+if (params$species == "chinesemedaka") {
+  file <-
+    "C:/Users/curryj/OneDrive - EC-EC/Desktop/tPOD_Curation_Project/tPOD_curation/annotationfiles/chinesemedaka_annotated_id_table_entrez_wholegenome.csv"
+} else if (params$species == "rainbowtrout") {
+  file <-
+    "C:/Users/curryj/OneDrive - EC-EC/Desktop/tPOD_Curation_Project/tPOD_curation/annotationfiles/rainbowtrout_annotated_id_table_entrez_wholegenome.csv"
+} else if (params$species == "fatheadminnow") {
+  file <-
+    "C:/Users/curryj/OneDrive - EC-EC/Desktop/tPOD_Curation_Project/tPOD_curation/annotationfiles/fatheadminnow_annotated_id_table_entrez_wholegenome.csv"
+}
+
+if (params$species %in% c("chinesemedaka", "rainbowtrout")) {
+  if (params$species == "chinesemedaka") {
+    annotation <- read_csv(file = file) %>%
+    dplyr::rename(SampleID = ensembl_gene_id) #Convert entrez IDs to character not double
+  } else if (params$species == "rainbowtrout") {
+    annotation <- read_csv(file = file) %>%
+      dplyr::rename(SampleID = ensembl_gene_id)
+  }
+  annotation$SampleID <- as.character(annotation$SampleID)
+  bmd_express_input <-
+    read_tsv(
+      file.path(
+        directory_path,
+        "RNASeqData",
+        "DESeq2_and_log2_norm_counts",
+        if_else(
+          condition = append_chemname,
+          true = paste0(
+            "bmdexpress_input_log2_transformed_",
+            params$chemical_name,
+            ".txt"
+          ),
+          false = "bmdexpress_input_log2_transformed.txt"
+        ) #Underscore before chemname!
+      )
+    )
+  
+  homolog <-
+    left_join( bmd_express_input[-1,], annotation[, c("SampleID", "drerio_homolog_ensembl_gene")]) %>% #join the bmd_express_input data with the annotation data
+    distinct() %>%
+    group_by(SampleID) %>%
+    dplyr::filter(!(is.na(drerio_homolog_ensembl_gene) & n() > 1)) %>% #Filter out those pesky NAs for genes with multiple homologs
+    ungroup()
+  
+  #count how many genes have multiple homologs and no homologs
+  n_multihomolg_genes_table <- homolog %>%
+    dplyr::group_by(SampleID) %>%
+    tally() %>%
+    pull(n) %>%
+    table()
+  n_multihomolg_genes <-
+    sum(n_multihomolg_genes_table[names(n_multihomolg_genes_table) >= 2]) #Multiple homologs
+  homologous_genes_table_output <- homolog %>%
+    dplyr::group_by(SampleID) %>%
+    tally() %>%
+    dplyr::rename(n_homologous_zf_genes = n)
+  
+  homologous_genes_table_output <-
+    homologous_genes_table_output %>%
+    left_join(annotation) %>%
+    distinct() %>%
+    group_by(SampleID) %>%
+    dplyr::filter(!(is.na(drerio_homolog_ensembl_gene) & n() > 1)) %>% #Filter out those pesky NAs for genes with multiple homologs
+    ungroup() %>%
+    dplyr::select(
+      SampleID,
+      external_gene_name,
+      n_homologous_zf_genes,
+      drerio_homolog_ensembl_gene,
+      drerio_homolog_associated_gene_name
+    ) %>%
+    dplyr::rename(
+      !!paste0(params$species, "_ensembl_gene_id") := SampleID,
+      !!paste0(params$species, "_gene_name") := external_gene_name,
+      homologous_zebrafish_ensembl_gene_id = drerio_homolog_ensembl_gene,
+      homologous_zebrafish_external_gene_name = drerio_homolog_associated_gene_name
+    ) %>%
+    dplyr::select(
+      !!paste0(params$species, "_ensembl_gene_id"),
+      !!paste0(params$species, "_gene_name"),
+      n_homologous_zf_genes,
+      homologous_zebrafish_ensembl_gene_id,
+      homologous_zebrafish_external_gene_name
+    ) %>%
+    distinct()
+  
+  # Calculate the number of rows with NA in the homologous_zebrafish_ensembl_gene_id column
+  num_missing_homologs <- sum(is.na(homologous_genes_table_output$homologous_zebrafish_ensembl_gene_id))
+  
+  
+  new_row <- bmd_express_input[1,]
+  new_row$drerio_homolog_ensembl_gene <- "Dose"
+  homolog <- rbind(new_row, homolog) #add the dose metadata row back
+  homolog <-
+    homolog[, c(colnames(homolog)[length(colnames(homolog))], colnames(homolog)[2:(length(colnames(homolog)) - 1)], colnames(homolog)[1])] #swap the first and last column
+  homolog <- homolog[,-ncol(homolog)] #remove the old ensemble ids
+  colnames(homolog)[1] <- "SampleID" # Rename back to SampleID
+  homolog <- homolog %>%
+    filter(rowSums(!is.na(homolog[, 2:ncol(homolog)])) > 0) #remove empty rows that were introduced by the join
+  write_tsv(
+    homolog,
+    file = file.path(
+      directory_path,
+      "RNASeqData",
+      "DESeq2_and_log2_norm_counts",
+      if_else(
+        condition = append_chemname,
+        true = paste0(
+          "bmdexpress_input_log2_transformed_",
+          params$chemical_name,
+          "_zf_homologs.txt"
+        ),
+        false = "bmdexpress_input_log2_transformed_zf_homologs.txt"
+      )
+    )
+  )
+  
+  print(
+    paste(
+      params$species,
+      "Gene IDs/probes were annotated with homologous zebrafish ensemble ids to facilitate the category analysis"
+    )
+  )
+  # print(paste(
+  #   length(entrez$SampleID[is.na(entrez$SampleID)]),
+  #   params$species,
+  #   "probes did not have an associated Entrez ID."
+  # ))
+  
+  # Print the total number of genes with multiple homologous zebrafish genes
+  print(paste("There were", n_multihomolg_genes, "genes/probes with multiple homologous zebrafish genes."))
+
+  # Print a breakdown of the number of entries for each gene with more than one homologous gene
+  cat("Breakdown of", params$species, "genes with more than one homologous zebrafish gene:\n")
+  for (i in names(n_multihomolg_genes_table)) {
+    if (as.numeric(i) >= 2) {
+      cat("Number of genes ids/probes with", i, "homologous genes:", n_multihomolg_genes_table[i], "\n")
+    }
+  }
+  #Print the total number of genes without homologs
+  print(paste0("And there were ", num_missing_homologs, " ", params$species, " gene IDs/probes without a corresponding homologous zebrafish ensembl gene id. The count values were retained and the probe was renamed to NA"))
+  
+  #Compare the number of genes before and after adding homologs
+  print(paste0("After annotating ", params$species, " gene ids with homologous zebrafish ensembl gene ids, were any of the original ", params$species, " gene ids lost?"))
+  check <- !all(homologous_genes_table_output[,1][[1]] %in% bmd_express_input$SampleID[-1]) #all entrez gene accessions in sampleId?
+  print(paste(check))
+  if (check == TRUE) {
+    print(paste(length(homologous_genes_table_output[,1][[1]][which(!(homologous_genes_table_output[,1][[1]] %in% bmd_express_input$SampleID[-1]))]), " Gene ids lost:"))
+    print(homologous_genes_table_output[,1][[1]][which(!(homologous_genes_table_output[,1][[1]] %in% bmd_express_input$SampleID[-1]))])
+  }
+  print("WARNING: Please use caution when interpreting category analysis results!")
+  
+  
+} else if (params$species %in% c("fatheadminnow")) {
+  
+  
+  if (params$species == "fatheadminnow") {
+    annotation <- read_csv(file = file) %>%
+      dplyr::rename(SampleID = entrezgene_accession)
+  }
+  annotation$SampleID <- as.character(annotation$SampleID) #Convert entrez IDs to character not double
+  bmd_express_input <-
+    read_tsv(
+      file.path(
+        directory_path,
+        "RNASeqData",
+        "DESeq2_and_log2_norm_counts",
+        if_else(
+          condition = append_chemname,
+          true = paste0(
+            "bmdexpress_input_log2_transformed_",
+            params$chemical_name,
+            ".txt"
+          ),
+          false = "bmdexpress_input_log2_transformed.txt"
+        ) #Underscore before chemname!
+      )
+    )
+  #if (params$species == "rainbowtrout") {
+  #  colnames(bmd_express_input)[colnames(bmd_express_input) == "SampleID"] <-
+  #    "external_gene_name"
+  #}
+  homolog <-
+    left_join(bmd_express_input[-1,],
+              annotation[, c(
+                "SampleID",
+                "ensembl_gene_id"
+              )]) %>% #join the bmd_express_input data with the annotation data
+    distinct() %>%
+    group_by(SampleID) %>%
+    dplyr::filter(!(is.na(ensembl_gene_id) & n() > 1)) %>% #Filter out those pesky NAs for genes with multiple homologs
+    ungroup()
+  
+  #count how many genes have multiple homologs and no homologs
+  n_multihomolg_genes_table <- homolog %>%
+    dplyr::group_by(SampleID) %>%
+    tally() %>%
+    pull(n) %>%
+    table()
+  n_multihomolg_genes <-
+    sum(n_multihomolg_genes_table[names(n_multihomolg_genes_table) >= 2]) #Multiple homologs
+  homologous_genes_table_output <- homolog %>%
+    dplyr::group_by(SampleID) %>%
+    tally() %>%
+    dplyr::rename(n_homologous_zf_genes = n)
+  
+  homologous_genes_table_output <-
+    homologous_genes_table_output %>%
+    left_join(annotation) %>%
+    distinct() %>%
+    group_by(SampleID) %>%
+    dplyr::filter(!(is.na(ensembl_gene_id) & n() > 1)) %>% #Filter out those pesky NAs for genes with multiple homologs
+    ungroup() %>%
+    dplyr::select(
+      SampleID,
+      n_homologous_zf_genes,
+      ensembl_gene_id,
+      external_gene_name,
+      entrezgene_id
+    ) %>%
+    dplyr::rename(
+      !!paste0(params$species, "_entrezgene_accession") := SampleID,
+      !!paste0(params$species, "_entrezgene_id") := entrezgene_id,
+      homologous_zebrafish_ensembl_gene_id = ensembl_gene_id,
+      homologous_zebrafish_external_gene_name = external_gene_name
+    ) %>%
+    dplyr::select(
+      !!paste0(params$species, "_entrezgene_id"),
+      !!paste0(params$species, "_entrezgene_accession"),
+      n_homologous_zf_genes,
+      homologous_zebrafish_ensembl_gene_id,
+      homologous_zebrafish_external_gene_name
+    ) %>%
+    distinct()
+  
+  # Calculate the number of rows with NA in the homologous_zebrafish_ensembl_gene_id column
+  num_missing_homologs <- sum(is.na(homologous_genes_table_output$homologous_zebrafish_ensembl_gene_id))
+  
+  new_row <- bmd_express_input[1,]
+  col <- "ensembl_gene_id"
+  new_row[[col]] <- "Dose"
+  homolog <- rbind(new_row, homolog) #add the dose metadata row back
+  homolog <-
+    homolog[, c(colnames(homolog)[length(colnames(homolog))], colnames(homolog)[2:(length(colnames(homolog)) - 1)], colnames(homolog)[1])] #swap the first and last column
+  homolog <- homolog[,-ncol(homolog)] #remove the old ensemble ids
+  colnames(homolog)[1] <- "SampleID" # Rename back to SampleID
+  homolog <- homolog %>%
+    filter(rowSums(!is.na(homolog[, 2:ncol(homolog)])) > 0) #remove empty rows that were introduced by the join
+  write_tsv(
+    homolog,
+    file = file.path(
+      directory_path,
+      "RNASeqData",
+      "DESeq2_and_log2_norm_counts",
+      if_else(
+        condition = append_chemname,
+        true = paste0(
+          "bmdexpress_input_log2_transformed_zf_homologs_",
+          params$chemical_name,
+          ".txt"
+        ),
+        false = "bmdexpress_input_log2_transformed_zf_homologs.txt"
+      )
+    )
+  )
+  print(
+    paste(
+      params$species,
+      "Gene IDs/probes were annotated with homologous zebrafish ensemble ids to facilitate the category analysis"
+    )
+  )
+  # print(paste(
+  #   length(entrez$SampleID[is.na(entrez$SampleID)]),
+  #   params$species,
+  #   "probes did not have an associated Entrez ID."
+  # ))
+  
+  # Print the total number of genes with multiple homologous zebrafish genes
+  print(paste("There were", n_multihomolg_genes, "genes/probes with multiple homologous zebrafish genes."))
+
+  # Print a breakdown of the number of entries for each gene with more than one homologous gene
+  cat("Breakdown of", params$species, "genes with more than one homologous zebrafish gene:\n")
+  for (i in names(n_multihomolg_genes_table)) {
+    if (as.numeric(i) >= 2) {
+      cat("Number of genes ids/probes with", i, "homologous genes:", n_multihomolg_genes_table[i], "\n")
+    }
+  }
+  #Print the total number of genes without homologs
+  print(paste0("And there were ", num_missing_homologs, " ", params$species, " gene IDs/probes without a corresponding homologous zebrafish ensembl gene id. The count values were retained and the probe was renamed to NA"))
+  
+  #Compare the number of genes before and after adding homologs
+  print(paste0("After annotating ", params$species, " gene ids with homologous zebrafish ensembl gene ids, were any of the original ", params$species, " gene ids lost?"))
+  check <- !all(homologous_genes_table_output[,2][[1]] %in% bmd_express_input$SampleID[-1]) #all entrez gene accessions in sampleId?
+  print(paste(check))
+  if (check == TRUE) {
+    print(paste(length(homologous_genes_table_output[,2][[1]][which(!(homologous_genes_table_output[,2][[1]] %in% bmd_express_input$SampleID[-1]))]), " Gene ids lost:"))
+    print(homologous_genes_table_output[,2][[1]][which(!(homologous_genes_table_output[,2][[1]] %in% bmd_express_input$SampleID[-1]))])
+  }
+  
+  print("WARNING: Please use caution when interpreting category analysis results!")
+  
+}
+```
+
+If the species analyzed was chinese medaka, fathead minnow or rainbowtrout, the table of all homologous zebrafish genes after conducting a BLASTN will appear here. These homologous zebrafish genes are used for the category analysis only:
+
+```{r homolog_tables, eval = envspecies}
+homologous_genes_table_output <- homologous_genes_table_output %>%
+  dplyr::mutate(n_homologous_zf_genes = if_else(condition = is.na(homologous_zebrafish_ensembl_gene_id), true = 0, false = n_homologous_zf_genes))
+
+# Render the table using DT with filtering, sorting, and download options
+DT::datatable(
+  homologous_genes_table_output,
+  rownames = FALSE,
+  colnames = c("Gene id", "Gene name", "Number of homologous zebrafish genes", "Homologous gene ensembl id", "Homologous gene name"),
+  extensions = 'Buttons',
+  options = list(
+    dom = 'Bfrtip',  # Show buttons and filter/search bar
+    buttons = c('copy', 'csv', 'excel', 'pdf', 'print'),  # Add download buttons
+    pageLength = 10,  # Number of rows per page
+    autoWidth = TRUE,  # Automatically adjust column width
+    scrollX = TRUE,  # Allow horizontal scrolling
+    order = list(list(0, 'asc'))  # Default sorting by the first column
+  ),
+  class = 'cell-border stripe hover'
+)
+```
+
+# Handling single replicates
+
+```{r handling_single_reps}
+# Function to remove single-replicate samples
+remove_single_replicates <- function(df) {
+  # Identify the dose row (where SampleID == "Dose")
+  dose_row <- df %>% filter(SampleID == "Dose")
+  
+  # Get the sample names (excluding 'SampleID' column)
+  sample_names <- colnames(df)[-1]
+  
+  # Extract doses for each sample
+  dose_values <- as.numeric(as.vector(dose_row[1, -1]))
+  
+  # Create a data frame with sample names and doses
+  dose_info <-
+    data.frame(Sample = sample_names,
+               Dose = dose_values,
+               stringsAsFactors = FALSE)
+  
+  # Count the number of samples per dose
+  dose_counts <-
+    dose_info %>% group_by(Dose) %>% summarise(count = n())
+  
+  # Identify doses with only one sample
+  doses_with_single_sample <-
+    dose_counts %>% filter(count == 1) %>% pull(Dose)
+  
+  # Get the sample names that need to be removed
+  samples_to_remove <-
+    dose_info %>% filter(Dose %in% doses_with_single_sample) %>% pull(Sample)
+  
+  # Log the samples being removed
+  if (length(samples_to_remove) > 0) {
+    message(
+      "Removing the following single-replicate samples: ",
+      paste(samples_to_remove, collapse = ", ")
+    )
+  } else {
+    message("No single-replicate samples found to remove.")
+  }
+  
+  # Remove the columns corresponding to the samples to be removed
+  df <- df %>% select(-all_of(samples_to_remove))
+  
+  return(df)
+}
+
+# Read in the bmd input data
+bmd_express_input <- read_tsv(file.path(
+  directory_path,
+  "RNASeqData",
+  "DESeq2_and_log2_norm_counts",
+  if_else(
+    condition = append_chemname,
+    true = paste0(
+      "bmdexpress_input_log2_transformed_",
+      params$chemical_name,
+      ".txt"
+    ),
+    false = "bmdexpress_input_log2_transformed.txt"
+  )
+))
+
+if (!params$onerepperdose) {
+  # Apply the function to your bmd_express_input
+  bmd_express_input_modified <-
+    remove_single_replicates(bmd_express_input)
+  
+  
+  # Sanity check
+  # Compare column names before and after to check if any changes were made
+  print("Original columns:")
+  print(colnames(bmd_express_input))
+  
+  print("Modified columns:")
+  print(colnames(bmd_express_input_modified))
+  
+  
+  # Save the modified data
+  write_tsv(
+    bmd_express_input_modified,
+    file = file.path(
+      directory_path,
+      "RNASeqData",
+      "DESeq2_and_log2_norm_counts",
+      if_else(
+        condition = append_chemname,
+        true = paste0(
+          "bmdexpress_input_log2_transformed_",
+          params$chemical_name,
+          ".txt"
+        ),
+        false = "bmdexpress_input_log2_transformed.txt"
+      )
+    )
+  )
+} else {
+  bmd_express_input_modified <- bmd_express_input
+  print(
+    "Experimental design is one replicate per dose for all doses. Therrefore, not removing any single replicate dose groups from the input data."
+  )
+}
+
+# If working with homolog data
+if (envspecies) {
+  homolog <- read_tsv(
+    file.path(
+      directory_path,
+      "RNASeqData",
+      "DESeq2_and_log2_norm_counts",
+      if_else(
+        condition = append_chemname,
+        true = paste0(
+          "bmdexpress_input_log2_transformed_zf_homologs_",
+          params$chemical_name,
+          ".txt"
+        ),
+        false = "bmdexpress_input_log2_transformed_zf_homologs.txt"
+      )
+    )
+  )
+  
+  if (!params$onerepperdose) {
+    # Apply the function to your homolog data
+    homolog_modified <- remove_single_replicates(homolog)
+    
+    # Sanity check
+    # Compare column names before and after to check if any changes were made
+    print("Original columns:")
+    print(colnames(homolog))
+    
+    print("Modified columns:")
+    print(colnames(homolog_modified))
+    
+    # Save the modified homolog data
+    write_tsv(
+      homolog_modified,
+      file = file.path(
+        directory_path,
+        "RNASeqData",
+        "DESeq2_and_log2_norm_counts",
+        if_else(
+          condition = append_chemname,
+          true = paste0(
+            "bmdexpress_input_log2_transformed_zf_homologs_",
+            params$chemical_name,
+            ".txt"
+          ),
+          false = "bmdexpress_input_log2_transformed_zf_homologs.txt"
+        )
+      )
+    )
+  } else {
+    bmd_express_input_modified <- bmd_express_input
+    print(
+      "Experimental design is one replicate per dose for all doses. Therrefore, not removing any single replicate dose groups from the input data."
+    )
+  }
+}
+```
+
+# Execute BMDExpress3
+
+## BMDEXpress3 configuration
+
+BMDExpress3 was run with the following configurations:
+
+```{r BMDExpress3_configuration_supported_species, eval=TRUE, echo=FALSE, warning=FALSE, eval=bmdexpresssupportedspecies}
+#BMDExpress3 natively supports these species: c("zebrafish", "mouse", "rat", "human", "hamster", "dog", "fruitfly")
+# Define the JSON content as an R object
+if (params$onerepperdose) {
+  json_content <- list(
+    # Preliminary SETUP for json configuration file
+    bm2FileName = normalizePath(file.path(
+      directory_path,
+      "BMDExpressData",
+      paste0("BMDExpressFile", params$chemical_name, ".bm2")
+    )),
+    overwrite = TRUE,
+    jsonExportFileName = normalizePath(file.path(
+      directory_path,
+      "BMDExpressData",
+      paste0("BMDExpressFile", params$chemical_name, ".json")
+    )),
+    expressionDataConfigs = list(
+      list(
+        inputFileName = normalizePath(
+          file.path(
+            directory_path,
+            "RNASeqData",
+            "DESeq2_and_log2_norm_counts",
+            if_else(
+              condition = append_chemname,
+              true = paste0(
+                "bmdexpress_input_log2_transformed_",
+                params$chemical_name,
+                ".txt"
+              ),
+              false = "bmdexpress_input_log2_transformed.txt"
+            )
+          )
+        ),
+        outputName = "AllExpressionDat",
+        hasHeaders = TRUE,
+        logTransformation = "BASE2",
+        platform = params$bmdx_platform_id
+      )
+    ),
+    # Skipping prefiltering because William's trend test requires replicates
+    # Defining BMDS modelling
+    bmdsConfigs = list(
+      list(
+        modelConfigs = list(
+          list(`@type` = "hill"),
+          list(`@type` = "power"),
+          list(`@type` = "poly", degree = 1),
+          list(`@type` = "poly", degree = 2),
+          list(`@type` = "poly", degree = 3),
+          list(`@type` = "exp", expModel = 3),
+          list(`@type` = "exp", expModel = 5)
+        ),
+        bmdsBestModelSelection = list(
+          bestPolyTest = 2,
+          pValueCutoff = 0.05,
+          flagHillWithKParameter = TRUE,
+          kParameterValue = 1,
+          bestModelSelectionWithFlaggedHill = 1
+        ),
+        bmdsInputConfig = list(
+          constantVariance = TRUE,
+          bmrFactor = 1,
+          bmdUBmdLEstimationMethod = 2
+        ),
+        inputCategory = "expression",
+        inputName = "AllExpressionDat",
+        outputName = "AllExpressionDat_bmds",
+        numberOfThreads = params$threads
+      )
+    ),
+    # Defining CATEGORY ANALYSIS
+    categoryAnalysisConfigs = list(
+      list(
+        `@type` = "go",
+        inputName = "AllExpressionDat_bmds",
+        outputName = "AllExpressionDat_bmds_GOuniversal",
+        removePromiscuousProbes = TRUE,
+        removeBMDGreaterHighDose = TRUE,
+        bmdPValueCutoff = 0, #Floor the BMD value cutoff because they will all be zero
+        bmdBMDLRatioMin = 20.0,
+        bmduBMDRatioMin = 20.0,
+        bmduBMDLRatioMin = 40.0,
+        nFoldBelowLowestDose = 10.0,
+        maxFoldChange = 1.2,
+        prefilterPValueMin = 1,
+        deduplicateGeneSets = TRUE,
+        identifyConflictingProbeSets = FALSE,
+        correlationCutoffForConflictingProbeSets = NULL,
+        minGenesInSet = params$min_gene,
+        goCategory = "universal"
+      ),
+      list(
+        `@type` = "pathway",
+        inputName = "AllExpressionDat_bmds",
+        outputName = "AllExpressionDat_bmds_REACTOME",
+        removePromiscuousProbes = TRUE,
+        removeBMDGreaterHighDose = TRUE,
+        bmdPValueCutoff = 0, #Floor the BMD value cutoff because they will all be zero
+        bmdBMDLRatioMin = 20.0,
+        bmduBMDRatioMin = 20.0,
+        bmduBMDLRatioMin = 40.0,
+        nFoldBelowLowestDose = 10.0,
+        maxFoldChange = 1.2,
+        prefilterPValueMin = 1, #Floor the BMD p value cutoff because they will all be zero
+        deduplicateGeneSets = TRUE,
+        identifyConflictingProbeSets = FALSE,
+        correlationCutoffForConflictingProbeSets = NULL,
+        minGenesInSet = params$min_gene,
+        signalingPathway = "REACTOME"
+      )
+    )
+  )
+} else {
+  json_content <- list(
+    # Preliminary SETUP for json configuration file
+    bm2FileName = normalizePath(file.path(
+      directory_path,
+      "BMDExpressData",
+      paste0("BMDExpressFile", params$chemical_name, ".bm2")
+    )),
+    overwrite = TRUE,
+    jsonExportFileName = normalizePath(file.path(
+      directory_path,
+      "BMDExpressData",
+      paste0("BMDExpressFile", params$chemical_name, ".json")
+    )),
+    expressionDataConfigs = list(
+      list(
+        inputFileName = normalizePath(
+          file.path(
+            directory_path,
+            "RNASeqData",
+            "DESeq2_and_log2_norm_counts",
+            if_else(
+              condition = append_chemname,
+              true = paste0(
+                "bmdexpress_input_log2_transformed_",
+                params$chemical_name,
+                ".txt"
+              ),
+              false = "bmdexpress_input_log2_transformed.txt"
+            )
+          )
+        ),
+        outputName = "AllExpressionDat",
+        hasHeaders = TRUE,
+        logTransformation = "BASE2",
+        platform = params$bmdx_platform_id
+      )
+    ),
+    # Defining PREFILTERING
+    preFilterConfigs = list(
+      list(
+        `@type` = "williams",
+        inputName = "AllExpressionDat",
+        outputName = "AllExpressionDat_williams",
+        pValueCutoff = 0.05,
+        useMultipleTestingCorrection = FALSE,
+        filterOutControlGenes = FALSE,
+        useFoldChange = TRUE,
+        foldChange = 1.5,
+        foldChangeLotel = 1.5,
+        pValueLotel = 0.05,
+        lotelTest = 1,
+        numberOfThreads = params$threads,
+        numberOfPermutations = 100
+      )
+    ),
+    # Defining BMDS modelling
+    bmdsConfigs = list(
+      list(
+        modelConfigs = list(
+          list(`@type` = "hill"),
+          list(`@type` = "power"),
+          list(`@type` = "poly", degree = 1),
+          list(`@type` = "poly", degree = 2),
+          list(`@type` = "poly", degree = 3),
+          list(`@type` = "exp", expModel = 3),
+          list(`@type` = "exp", expModel = 5)
+        ),
+        bmdsBestModelSelection = list(
+          bestPolyTest = 2,
+          pValueCutoff = 0.05,
+          flagHillWithKParameter = TRUE,
+          kParameterValue = 1,
+          bestModelSelectionWithFlaggedHill = 1
+        ),
+        bmdsInputConfig = list(
+          constantVariance = TRUE,
+          bmrFactor = 1,
+          bmdUBmdLEstimationMethod = 2
+        ),
+        inputCategory = "williams",
+        inputName = "AllExpressionDat_williams",
+        outputName = "AllExpressionDat_williams_bmds",
+        numberOfThreads = params$threads
+      )
+    ),
+    # Defining CATEGORY ANALYSIS
+    categoryAnalysisConfigs = list(
+      list(
+        `@type` = "go",
+        inputName = "AllExpressionDat_williams_bmds",
+        outputName = "AllExpressionDat_williams_bmds_GOuniversal",
+        removePromiscuousProbes = TRUE,
+        removeBMDGreaterHighDose = TRUE,
+        bmdPValueCutoff = 0.1,
+        bmdBMDLRatioMin = 20.0,
+        bmduBMDRatioMin = 20.0,
+        bmduBMDLRatioMin = 40.0,
+        nFoldBelowLowestDose = 10.0,
+        maxFoldChange = 1.2,
+        prefilterPValueMin = 0.05,
+        deduplicateGeneSets = TRUE,
+        identifyConflictingProbeSets = FALSE,
+        correlationCutoffForConflictingProbeSets = NULL,
+        minGenesInSet = params$min_gene,
+        goCategory = "universal"
+      ),
+      list(
+        `@type` = "pathway",
+        inputName = "AllExpressionDat_williams_bmds",
+        outputName = "AllExpressionDat_williams_bmds_REACTOME",
+        removePromiscuousProbes = TRUE,
+        removeBMDGreaterHighDose = TRUE,
+        bmdPValueCutoff = 0.1,
+        bmdBMDLRatioMin = 20.0,
+        bmduBMDRatioMin = 20.0,
+        bmduBMDLRatioMin = 40.0,
+        nFoldBelowLowestDose = 10.0,
+        maxFoldChange = 1.2,
+        prefilterPValueMin = 0.05,
+        deduplicateGeneSets = TRUE,
+        identifyConflictingProbeSets = FALSE,
+        correlationCutoffForConflictingProbeSets = NULL,
+        minGenesInSet = params$min_gene,
+        signalingPathway = "REACTOME"
+      )
+    )
+  )
+}
+
+
+# Convert the R object to JSON format
+json_data <- toJSON(json_content, pretty = TRUE, auto_unbox = TRUE, null = "null")
+```
+
+```{r BMDExpress3_configuration_non-supported_species_BMDs_only, echo=FALSE, warning=FALSE, eval=envspecies}
+#BMDExpress3 natively supports these species: c("zebrafish", "mouse", "rat", "human", "hamster", "dog", "fruitfly")
+# Define the JSON content as an R object
+if (params$onerepperdose) {
+json_content <- list(
+  # Preliminary SETUP for json configuration file
+  bm2FileName = normalizePath(
+    file.path(directory_path, "BMDExpressData", paste0("BMDExpressFile", params$chemical_name,".bm2"))
+  ),
+  overwrite = TRUE,
+  jsonExportFileName = normalizePath(
+    file.path(directory_path, "BMDExpressData", paste0("BMDExpressFile", params$chemical_name,".json"))
+  ),
+  expressionDataConfigs = list(
+    list(
+      inputFileName = normalizePath(
+        file.path(
+          directory_path,
+          "RNASeqData",
+          "DESeq2_and_log2_norm_counts",
+          if_else(condition = append_chemname, true = paste0("bmdexpress_input_log2_transformed_", params$chemical_name, ".txt"), false = "bmdexpress_input_log2_transformed.txt")
+        )
+      ),
+      outputName = "AllExpressionDat",
+      hasHeaders = TRUE,
+      logTransformation = "BASE2",
+      platform = "Generic"
+    )
+  ),
+  # Skipping PREFILTERING because William's trend test requires more than one replicate per dose
+  # Defining BMDS modelling
+  bmdsConfigs = list(
+    list(
+      modelConfigs = list(
+        list(`@type` = "hill"),
+        list(`@type` = "power"),
+        list(`@type` = "poly", degree = 1),
+        list(`@type` = "poly", degree = 2),
+        list(`@type` = "poly", degree = 3),
+        list(`@type` = "exp", expModel = 3),
+        list(`@type` = "exp", expModel = 5)
+      ),
+      bmdsBestModelSelection = list(
+        bestPolyTest = 2,
+        pValueCutoff = 0.05,
+        flagHillWithKParameter = TRUE,
+        kParameterValue = 1,
+        bestModelSelectionWithFlaggedHill = 1
+      ),
+      bmdsInputConfig = list(
+        constantVariance = TRUE,
+        bmrFactor = 1,
+        bmdUBmdLEstimationMethod = 2
+      ),
+      inputCategory = "expression",
+      inputName = "AllExpressionDat",
+      outputName = "AllExpressionDat_bmds",
+      numberOfThreads = params$threads
+    )
+  )
+)
+} else {
+json_content <- list(
+  # Preliminary SETUP for json configuration file
+  bm2FileName = normalizePath(
+    file.path(directory_path, "BMDExpressData", paste0("BMDExpressFile", params$chemical_name,".bm2"))
+  ),
+  overwrite = TRUE,
+  jsonExportFileName = normalizePath(
+    file.path(directory_path, "BMDExpressData", paste0("BMDExpressFile", params$chemical_name,".json"))
+  ),
+  expressionDataConfigs = list(
+    list(
+      inputFileName = normalizePath(
+        file.path(
+          directory_path,
+          "RNASeqData",
+          "DESeq2_and_log2_norm_counts",
+          if_else(condition = append_chemname, true = paste0("bmdexpress_input_log2_transformed_", params$chemical_name, ".txt"), false = "bmdexpress_input_log2_transformed.txt")
+        )
+      ),
+      outputName = "AllExpressionDat",
+      hasHeaders = TRUE,
+      logTransformation = "BASE2",
+      platform = "Generic"
+    )
+  ),
+  # Defining PREFILTERING
+  preFilterConfigs = list(
+    list(
+      `@type` = "williams",
+      inputName = "AllExpressionDat",
+      outputName = "AllExpressionDat_williams",
+      pValueCutoff = 0.05,
+      useMultipleTestingCorrection = FALSE,
+      filterOutControlGenes = FALSE,
+      useFoldChange = TRUE,
+      foldChange = 1.5,
+      foldChangeLotel = 1.5,
+      pValueLotel = 0.05,
+      lotelTest = 1,
+      numberOfThreads = params$threads,
+      numberOfPermutations = 100
+    )
+  ),
+  # Defining BMDS modelling
+  bmdsConfigs = list(
+    list(
+      modelConfigs = list(
+        list(`@type` = "hill"),
+        list(`@type` = "power"),
+        list(`@type` = "poly", degree = 1),
+        list(`@type` = "poly", degree = 2),
+        list(`@type` = "poly", degree = 3),
+        list(`@type` = "exp", expModel = 3),
+        list(`@type` = "exp", expModel = 5)
+      ),
+      bmdsBestModelSelection = list(
+        bestPolyTest = 2,
+        pValueCutoff = 0.05,
+        flagHillWithKParameter = TRUE,
+        kParameterValue = 1,
+        bestModelSelectionWithFlaggedHill = 1
+      ),
+      bmdsInputConfig = list(
+        constantVariance = TRUE,
+        bmrFactor = 1,
+        bmdUBmdLEstimationMethod = 2
+      ),
+      inputCategory = "williams",
+      inputName = "AllExpressionDat_williams",
+      outputName = "AllExpressionDat_williams_bmds",
+      numberOfThreads = params$threads
+    )
+  )
+)
+}
+# Convert the R object to JSON format
+json_data <- toJSON(json_content, pretty = TRUE, auto_unbox = TRUE, null = "null")
+```
+
+```{r save_json, eval = params$executeBMDExpress3, echo = FALSE, warning = FALSE}
+# Specify the file path
+config_file_path <-
+  normalizePath(file.path(directory_path, "BMDExpressData", paste0("config", params$chemical_name, ".json")))
+
+# Write the JSON data to a file
+write(json_data, file = config_file_path)
+
+# Print a message indicating the file has been saved
+cat("JSON data has been saved to", config_file_path)
+```
+
+
+```{r config_json, echo=TRUE, eval = TRUE}
+if (params$onerepperdose) {
+  message("Please use caution when interpreting the results because there is only one replicate per dose group and standard prefiltering (William's trend test) could not be applied. Also fitPValues for all models are zero due to a lack of within-group variance and the inability to calculate a mean and standard deviation for the saturated model. STANDARD FILTERING THRESHOLDS ARE NOT BEING APPLIED!!!!")
+}
+cat(json_data)
+```
+
+```{r BMDExpress3_configuration_non-supported_species_BMDs_and_Categories, echo=FALSE, warning=FALSE, eval=envspecies}
+#BMDExpress3 natively supports these species: c("zebrafish", "mouse", "rat", "human", "hamster", "dog", "fruitfly")
+# Define the JSON content as an R object
+if (params$onerepperdose) {
+  json_content <- list(
+    # Preliminary SETUP for json configuration file
+    bm2FileName = normalizePath(file.path(
+      directory_path,
+      "BMDExpressData",
+      paste0("BMDExpressFile", params$chemical_name, "_zf_homologs.bm2")
+    )),
+    overwrite = TRUE,
+    jsonExportFileName = normalizePath(file.path(
+      directory_path,
+      "BMDExpressData",
+      paste0(
+        "BMDExpressFile",
+        params$chemical_name,
+        "_zf_homologs.json"
+      )
+    )),
+    expressionDataConfigs = list(
+      list(
+        inputFileName = normalizePath(
+          file.path(
+            directory_path,
+            "RNASeqData",
+            "DESeq2_and_log2_norm_counts",
+            if_else(
+              condition = append_chemname,
+              true = paste0(
+                "bmdexpress_input_log2_transformed_zf_homologs_",
+                params$chemical_name,
+                ".txt"
+              ),
+              false = "bmdexpress_input_log2_transformed_zf_homologs.txt"
+            )
+          )
+        ),
+        outputName = "AllExpressionDat",
+        hasHeaders = TRUE,
+        logTransformation = "BASE2",
+        platform = params$bmdx_platform_id
+      )
+    ),
+    # Skipping PREFILTER because William's trend test requires replicates to calculate statistics
+    # Defining BMDS modelling
+    bmdsConfigs = list(
+      list(
+        modelConfigs = list(
+          list(`@type` = "hill"),
+          list(`@type` = "power"),
+          list(`@type` = "poly", degree = 1),
+          list(`@type` = "poly", degree = 2),
+          list(`@type` = "poly", degree = 3),
+          list(`@type` = "exp", expModel = 3),
+          list(`@type` = "exp", expModel = 5)
+        ),
+        bmdsBestModelSelection = list(
+          bestPolyTest = 2,
+          pValueCutoff = 0.05,
+          flagHillWithKParameter = TRUE,
+          kParameterValue = 1,
+          bestModelSelectionWithFlaggedHill = 1
+        ),
+        bmdsInputConfig = list(
+          constantVariance = TRUE,
+          bmrFactor = 1,
+          bmdUBmdLEstimationMethod = 2
+        ),
+        inputCategory = "expression",
+        inputName = "AllExpressionDat",
+        outputName = "AllExpressionDat_bmds",
+        numberOfThreads = params$threads
+      )
+    ),
+    # Defining CATEGORY ANALYSIS
+    categoryAnalysisConfigs = list(
+      list(
+        `@type` = "go",
+        inputName = "AllExpressionDat_bmds",
+        outputName = "AllExpressionDat_bmds_GOuniversal",
+        removePromiscuousProbes = TRUE,
+        removeBMDGreaterHighDose = TRUE,
+        bmdPValueCutoff = 0, #Floor the BMD value cutoff because they will all be zero
+        bmdBMDLRatioMin = 20.0,
+        bmduBMDRatioMin = 20.0,
+        bmduBMDLRatioMin = 40.0,
+        nFoldBelowLowestDose = 10.0,
+        maxFoldChange = 1.2,
+        prefilterPValueMin = 1,
+        deduplicateGeneSets = TRUE,
+        identifyConflictingProbeSets = FALSE,
+        correlationCutoffForConflictingProbeSets = NULL,
+        minGenesInSet = params$min_gene,
+        goCategory = "universal"
+      ),
+      list(
+        `@type` = "pathway",
+        inputName = "AllExpressionDat_bmds",
+        outputName = "AllExpressionDat_bmds_REACTOME",
+        removePromiscuousProbes = TRUE,
+        removeBMDGreaterHighDose = TRUE,
+        bmdPValueCutoff = 0, #Floor the BMD value cutoff because they will all be zero
+        bmdBMDLRatioMin = 20.0,
+        bmduBMDRatioMin = 20.0,
+        bmduBMDLRatioMin = 40.0,
+        nFoldBelowLowestDose = 10.0,
+        maxFoldChange = 1.2,
+        prefilterPValueMin = 1,
+        deduplicateGeneSets = TRUE,
+        identifyConflictingProbeSets = FALSE,
+        correlationCutoffForConflictingProbeSets = NULL,
+        minGenesInSet = params$min_gene,
+        signalingPathway = "REACTOME"
+      )
+    )
+  )
+} else {
+  json_content <- list(
+    # Preliminary SETUP for json configuration file
+    bm2FileName = normalizePath(file.path(
+      directory_path,
+      "BMDExpressData",
+      paste0("BMDExpressFile", params$chemical_name, "_zf_homologs.bm2")
+    )),
+    overwrite = TRUE,
+    jsonExportFileName = normalizePath(file.path(
+      directory_path,
+      "BMDExpressData",
+      paste0(
+        "BMDExpressFile",
+        params$chemical_name,
+        "_zf_homologs.json"
+      )
+    )),
+    expressionDataConfigs = list(
+      list(
+        inputFileName = normalizePath(
+          file.path(
+            directory_path,
+            "RNASeqData",
+            "DESeq2_and_log2_norm_counts",
+            if_else(
+              condition = append_chemname,
+              true = paste0(
+                "bmdexpress_input_log2_transformed_zf_homologs_",
+                params$chemical_name,
+                ".txt"
+              ),
+              false = "bmdexpress_input_log2_transformed_zf_homologs.txt"
+            )
+          )
+        ),
+        outputName = "AllExpressionDat",
+        hasHeaders = TRUE,
+        logTransformation = "BASE2",
+        platform = params$bmdx_platform_id
+      )
+    ),
+    # Defining PREFILTERING
+    preFilterConfigs = list(
+      list(
+        `@type` = "williams",
+        inputName = "AllExpressionDat",
+        outputName = "AllExpressionDat_williams",
+        pValueCutoff = 0.05,
+        useMultipleTestingCorrection = FALSE,
+        filterOutControlGenes = FALSE,
+        useFoldChange = TRUE,
+        foldChange = 1.5,
+        foldChangeLotel = 1.5,
+        pValueLotel = 0.05,
+        lotelTest = 1,
+        numberOfThreads = params$threads,
+        numberOfPermutations = 100
+      )
+    ),
+    # Defining BMDS modelling
+    bmdsConfigs = list(
+      list(
+        modelConfigs = list(
+          list(`@type` = "hill"),
+          list(`@type` = "power"),
+          list(`@type` = "poly", degree = 1),
+          list(`@type` = "poly", degree = 2),
+          list(`@type` = "poly", degree = 3),
+          list(`@type` = "exp", expModel = 3),
+          list(`@type` = "exp", expModel = 5)
+        ),
+        bmdsBestModelSelection = list(
+          bestPolyTest = 2,
+          pValueCutoff = 0.05,
+          flagHillWithKParameter = TRUE,
+          kParameterValue = 1,
+          bestModelSelectionWithFlaggedHill = 1
+        ),
+        bmdsInputConfig = list(
+          constantVariance = TRUE,
+          bmrFactor = 1,
+          bmdUBmdLEstimationMethod = 2
+        ),
+        inputCategory = "williams",
+        inputName = "AllExpressionDat_williams",
+        outputName = "AllExpressionDat_williams_bmds",
+        numberOfThreads = params$threads
+      )
+    ),
+    # Defining CATEGORY ANALYSIS
+    categoryAnalysisConfigs = list(
+      list(
+        `@type` = "go",
+        inputName = "AllExpressionDat_williams_bmds",
+        outputName = "AllExpressionDat_williams_bmds_GOuniversal",
+        removePromiscuousProbes = TRUE,
+        removeBMDGreaterHighDose = TRUE,
+        bmdPValueCutoff = 0.1,
+        bmdBMDLRatioMin = 20.0,
+        bmduBMDRatioMin = 20.0,
+        bmduBMDLRatioMin = 40.0,
+        nFoldBelowLowestDose = 10.0,
+        maxFoldChange = 1.2,
+        prefilterPValueMin = 0.05,
+        deduplicateGeneSets = TRUE,
+        identifyConflictingProbeSets = FALSE,
+        correlationCutoffForConflictingProbeSets = NULL,
+        minGenesInSet = params$min_gene,
+        goCategory = "universal"
+      ),
+      list(
+        `@type` = "pathway",
+        inputName = "AllExpressionDat_williams_bmds",
+        outputName = "AllExpressionDat_williams_bmds_REACTOME",
+        removePromiscuousProbes = TRUE,
+        removeBMDGreaterHighDose = TRUE,
+        bmdPValueCutoff = 0.1,
+        bmdBMDLRatioMin = 20.0,
+        bmduBMDRatioMin = 20.0,
+        bmduBMDLRatioMin = 40.0,
+        nFoldBelowLowestDose = 10.0,
+        maxFoldChange = 1.2,
+        prefilterPValueMin = 0.05,
+        deduplicateGeneSets = TRUE,
+        identifyConflictingProbeSets = FALSE,
+        correlationCutoffForConflictingProbeSets = NULL,
+        minGenesInSet = params$min_gene,
+        signalingPathway = "REACTOME"
+      )
+    )
+  )
+}
+
+# Convert the R object to JSON format
+json_data <- toJSON(json_content, pretty = TRUE, auto_unbox = TRUE, null = "null")
+```
+
+```{r save_json_non-supported, eval = params$executeBMDExpress3, echo = FALSE, warning = FALSE, eval = envspecies}
+# Specify the file path
+config_file_path_zf_homolog <-
+  normalizePath(file.path(directory_path, "BMDExpressData", paste0("config", params$chemical_name, "_zf_homologs.json")))
+
+# Write the JSON data to a file
+write(json_data, file = config_file_path_zf_homolog)
+
+# Print a message indicating the file has been saved
+cat("JSON data has been saved to", config_file_path_zf_homolog)
+```
+
+
+```{r config_json_non-supported, echo=TRUE, eval = envspecies}
+cat(json_data)
+```
+
+*If you skipped BMDEXpress3, skip to the next main section of the report.*
+
+The `r Sys.info()['sysname'][[1]]` version of BMDExpress3 was used to calculate BMDs. Please ensure that the 'BMDExpress3' directory containing the 'bmdexpress3-cmd' executable is in your system/user PATH and installed before executing... The current PATH includes the following directories:
+
+```{r echoPATH, echo=FALSE, eval=params$executeBMDExpress3}
+# Detect the operating system
+os <- Sys.info()['sysname']
+
+# Function to print the PATH variable in a readable format
+print_path <- function(path_string, delimiter) {
+  paths <- unlist(strsplit(path_string, delimiter))
+  cat(paste(paths, collapse = "\n"))
+}
+
+# Define the command to be executed
+if (os == "Windows") {
+  cmd <- "powershell -Command \"echo $env:Path\""
+  # Execute the command
+  path_output <- system(cmd, intern = TRUE)
+  # Print readable PATH
+  print_path(path_output, ";")
+} else if (os == "Linux") {
+  cmd <- "bash -c 'echo $PATH'"
+  # Execute the command
+  path_output <- system(cmd, intern = TRUE)
+  # Print readable PATH
+  print_path(path_output, ":")
+} else if (os == "Darwin") {
+  cmd <- "bash -c 'echo $PATH'"
+  # Execute the command
+  path_output <- system(cmd, intern = TRUE)
+  # Print readable PATH
+  print_path(path_output, ":")
+} else {
+  stop("Unsupported OS")
+}
+```
+
+If on Windows you should see something like `r paste("C:/Users/user/BMDExpress3")`... wherever you have installed BMDExpress3 to...
+
+The version of bmdexpress3-cmd installed is:
+
+```{r BMDExpress3_version, echo=FALSE, eval=params$executeBMDExpress3}
+# First print out the version of BMDExpress3-cmd
+if (os == "Windows") {
+  cmd <- "powershell -Command \"bmdexpress3-cmd --version\""
+  # Execute the command
+  version <- system(cmd, intern = TRUE)
+  # Print readable PATH
+  print(version)
+} else if (os == "Linux") {
+  cmd <- "bash -c 'bmdexpress3-cmd --version'"
+  # Execute the command
+  version <- system(cmd, intern = TRUE)
+  # Print readable PATH
+  print(version)
+} else if (os == "Darwin") {
+  cmd <- "bash -c 'bmdexpress3-cmd --version'"
+  # Execute the command
+  version <- system(cmd, intern = TRUE)
+  # Print readable PATH
+  print(version)
+} else {
+  stop("Unsupported OS")
+}
+```
+
+## BMDExpress3 analysis
+
+BMDExpress3 will analyze the data using the configuration file above.
+
+```{r BMDExpress3_analyze, echo=FALSE, eval=params$executeBMDExpress3}
+#config_file_path <-
+#  normalizePath(file.path(directory_path, "BMDExpressData", "config.json"))
+
+# Second, analyze the data
+if (os == "Windows") {
+  # Escape the path to handle spaces
+  config_file_path <- paste0("\"", config_file_path, "\"")
+  # Defining the command
+  cmd <- paste0('powershell -Command "bmdexpress3-cmd analyze --config-file \"', config_file_path, '\""')
+  # Execute the command
+  analyze <- system(cmd)
+
+} else if (os == "Linux") {
+  # Escape the path to handle spaces
+  config_file_path <- paste0("'", config_file_path, "'")
+  # Defining the command
+  cmd <- paste0("bash -c 'bmdexpress3-cmd analyze --config-file ", config_file_path, "'")
+  # Execute the command
+  analyze <- system(cmd)
+
+} else if (os == "Darwin") {
+  # Escape the path to handle spaces
+  config_file_path <- paste0("'", config_file_path, "'")
+  # Defining the command
+  cmd <- paste0("bash -c 'bmdexpress3-cmd analyze --config-file ", config_file_path, "'")
+  # Execute the command
+  analyze <- system(cmd)
+
+} else {
+  stop("Unsupported OS")
+}
+```
+
+```{r BMDExpress3_analyze_non-supported, echo=FALSE, eval=params$executeBMDExpress3 & envspecies}
+#config_file_path <-
+#  normalizePath(file.path(directory_path, "BMDExpressData", "config.json"))
+
+# Second, analyze the data
+if (os == "Windows") {
+  # Escape the path to handle spaces
+  config_file_path_zf_homolog <- paste0("\"", config_file_path_zf_homolog, "\"")
+  # Defining the command
+  cmd <- paste0('powershell -Command "bmdexpress3-cmd analyze --config-file \"', config_file_path_zf_homolog, '\""')
+  # Execute the command
+  analyze <- system(cmd)
+
+} else if (os == "Linux") {
+  # Escape the path to handle spaces
+  config_file_path_zf_homolog <- paste0("'", config_file_path_zf_homolog, "'")
+  # Defining the command
+  cmd <- paste0("bash -c 'bmdexpress3-cmd analyze --config-file ", config_file_path_zf_homolog, "'")
+  # Execute the command
+  analyze <- system(cmd)
+
+} else if (os == "Darwin") {
+  # Escape the path to handle spaces
+  config_file_path_zf_homolog <- paste0("'", config_file_path_zf_homolog, "'")
+  # Defining the command
+  cmd <- paste0("bash -c 'bmdexpress3-cmd analyze --config-file ", config_file_path_zf_homolog, "'")
+  # Execute the command
+  analyze <- system(cmd)
+
+} else {
+  stop("Unsupported OS")
+}
+```
+
+## BMDExpress3 export results
+
+```{r BMDExpress3_export, echo=FALSE, eval=params$executeBMDExpress3}
+input_bm2 <-
+  normalizePath(file.path(directory_path, "BMDExpressData", paste0("BMDExpressFile", params$chemical_name, ".bm2")))
+if (params$species %in% c("fatheadminnow", "rainbowtrout", "chinesemedaka")) {
+  input_bm2_zf_homologs <-
+    normalizePath(file.path(
+      directory_path,
+      "BMDExpressData",
+      paste0("BMDExpressFile", params$chemical_name, "_zf_homologs.bm2")
+    ))
+}
+williamsdata <-
+  normalizePath(file.path(
+    directory_path,
+    "BMDExpressData",
+    "Williams",
+    paste0("mywilliamsdata", params$chemical_name, ".txt")
+  ))
+categoricaldata <-
+  normalizePath(
+    file.path(
+      directory_path,
+      "BMDExpressData",
+      "GO_and_REACTOME",
+      paste0("mycategoricaldata", params$chemical_name, ".txt")
+    )
+  )
+if (params$species %in% c("fatheadminnow", "rainbowtrout", "chinesemedaka")) {
+  categoricaldata_zf_homologs <-
+    normalizePath(file.path(
+      directory_path,
+      "BMDExpressData",
+      "GO_and_REACTOME",
+      paste0(
+        "mycategoricaldata",
+        params$chemical_name,
+        "_zf_homologs.txt"
+      )
+    ))
+}
+bmddata <-
+  normalizePath(file.path(directory_path, "BMDExpressData", "BMD", paste0("mybmddata", params$chemical_name, ".txt")))
+# Escape the path to handle spaces
+input_bm2 <- paste0("'", input_bm2, "'")
+if (params$species %in% c("fatheadminnow", "rainbowtrout", "chinesemedaka")) {
+  input_bm2_zf_homologs <- paste0("'", input_bm2_zf_homologs, "'")
+}
+williamsdata <- paste0("'", williamsdata, "'")
+categoricaldata <- paste0("'", categoricaldata, "'")
+if (params$species %in% c("fatheadminnow", "rainbowtrout", "chinesemedaka")) {
+  categoricaldata_zf_homologs <- paste0("'", categoricaldata_zf_homologs, "'")
+}
+bmddata <- paste0("'", bmddata, "'")
+
+# Third, export the data
+if (os == "Windows") {
+  
+  # Defining the command
+  cmd <-
+    paste0(
+      'powershell -Command "bmdexpress3-cmd export --input-bm2 ',
+      input_bm2,
+      ' --analysis-group williams --output-file-name ',
+      williamsdata,
+      '"'
+    )
+  # Execute the command
+  exp_williams <- system(cmd)
+  # Defining the command
+  cmd <-
+    paste0(
+      'powershell -Command "bmdexpress3-cmd export --input-bm2 ',
+      input_bm2,
+      ' --analysis-group bmd --output-file-name ',
+      bmddata,
+      '"'
+    )
+  # Execute the command
+  exp_bmd <- system(cmd)
+  # Defining the command
+  if (params$species %in% c("fatheadminnow", "rainbowtrout", "chinesemedaka")) {
+    cmd <-
+      paste0(
+        'powershell -Command "bmdexpress3-cmd export --input-bm2 ',
+        input_bm2_zf_homologs,
+        ' --analysis-group categorical --output-file-name ',
+        categoricaldata_zf_homologs,
+        '"'
+      )
+  } else {
+    cmd <-
+      paste0(
+        'powershell -Command "bmdexpress3-cmd export --input-bm2 ',
+        input_bm2,
+        ' --analysis-group categorical --output-file-name ',
+        categoricaldata,
+        '"'
+      )
+  }
+  # Execute the command
+  exp_categorical <- system(cmd)
+  
+} else if (os == "Linux") {
+  # Defining the command
+  cmd <-
+    paste0(
+      "bash -c 'bmdexpress3-cmd export --input-bm2 ",
+      input_bm2,
+      " --analysis-group williams --output-file-name ",
+      williamsdata,
+      "'"
+    )
+  # Execute the command
+  exp_williams <- system(cmd)
+  # Defining the command
+  cmd <-
+    paste0(
+      "bash -c 'bmdexpress3-cmd export --input-bm2 ",
+      input_bm2,
+      " --analysis-group bmd --output-file-name ",
+      bmddata,
+      "'"
+    )
+  # Execute the command
+  exp_bmd <- system(cmd)
+  # Defining the command
+  if (params$species %in% c("fatheadminnow", "rainbowtrout", "chinesemedaka")) {
+    cmd <-
+      paste0(
+        "bash -c 'bmdexpress3-cmd export --input-bm2 ",
+        input_bm2_zf_homologs,
+        " --analysis-group categorical --output-file-name ",
+        categoricaldata_zf_homologs,
+        "'"
+      )
+  } else {
+    cmd <-
+      paste0(
+        "bash -c 'bmdexpress3-cmd export --input-bm2 ",
+        input_bm2,
+        " --analysis-group categorical --output-file-name ",
+        categoricaldata,
+        "'"
+      )
+  }
+  # Execute the command
+  exp_categorical <- system(cmd)
+  
+} else if (os == "Darwin") {
+  # Defining the command
+  cmd <-
+    paste0(
+      "bash -c 'bmdexpress3-cmd export --input-bm2 ",
+      input_bm2,
+      " --analysis-group williams --output-file-name ",
+      williamsdata,
+      "'"
+    )
+  # Execute the command
+  exp_williams <- system(cmd)
+  # Defining the command
+  cmd <-
+    paste0(
+      "bash -c 'bmdexpress3-cmd export --input-bm2 ",
+      input_bm2,
+      " --analysis-group bmd --output-file-name ",
+      bmddata,
+      "'"
+    )
+  # Execute the command
+  exp_bmd <- system(cmd)
+  # Defining the command
+  if (params$species %in% c("fatheadminnow", "rainbowtrout", "chinesemedaka")) {
+    cmd <-
+      paste0(
+        "bash -c 'bmdexpress3-cmd export --input-bm2 ",
+        input_bm2_zf_homologs,
+        " --analysis-group categorical --output-file-name ",
+        categoricaldata_zf_homologs,
+        "'"
+      )
+  } else {
+    cmd <-
+      paste0(
+        "bash -c 'bmdexpress3-cmd export --input-bm2 ",
+        input_bm2,
+        " --analysis-group categorical --output-file-name ",
+        categoricaldata,
+        "'"
+      )
+  }
+  # Execute the command
+    exp_categorical <- system(cmd)
+  
+} else {
+  stop("Unsupported OS")
+}
+```
+
+
+# Begin tPOD report
+
+## Load the metadata and BMD data
+
+```{r metadata, echo=FALSE, warning=FALSE, message=FALSE}
+####Metadata Import####
+metadata_file <-
+  normalizePath(list.files(
+    path = normalizePath(file.path(directory_path, "RNASeqData", "metadata")),
+    pattern = "Table\\.csv$|metadata.*\\.csv$",
+    full.names = TRUE,
+    ignore.case = TRUE
+  ))
+metadata <- read.csv(metadata_file)
+metadata$DoseUnits <- coalesce(metadata$DoseUnits, metadata$DoseUnit) #Sometimes the column is DoseUnit and sometimes DoseUnits, so accomodating for both possibilites
+chemname <- unique(metadata[[params$treatment_var]])
+chemname <- chemname[chemname %in% params$chemical_name]
+lowestdoses <-
+  unique(metadata[, c(params$treatment_var, params$dose)]) %>%
+  dplyr::group_by(!!sym(params$treatment_var)) %>%
+  dplyr::filter(!!sym(params$dose) > 0) %>%
+  dplyr::summarise_all(min)
+highestdoses <-
+  unique(metadata[, c(params$treatment_var, params$dose)]) %>%
+  dplyr::group_by(!!sym(params$treatment_var)) %>%
+  dplyr::filter(!!sym(params$dose) > 0) %>%
+  dplyr::summarise_all(max)
+bmdfiles <-
+  normalizePath(list.files(
+    path = normalizePath(file.path(directory_path, "BMDExpressData", "BMD")),
+    pattern = paste0(params$chemical_name, "\\.txt$"),
+    full.names = TRUE,
+    ignore.case = TRUE
+  )) %>% setNames(chemname)
+categoryfiles <-
+  normalizePath(list.files(
+    path = normalizePath(
+      file.path(directory_path, "BMDExpressData", "GO_and_REACTOME")
+    ),
+    pattern = paste0(params$chemical_name, "(_zf_homologs)?\\.txt$"),
+    full.names = TRUE,
+    ignore.case = TRUE
+  )) %>% setNames(chemname)
+```
+
+```{r inputdata, echo=FALSE, warning=FALSE, message=FALSE}
+####Gene BMD data####
+#Warning: The bmdfiles must be output by the command line version of BMDExpress3 in order for this chunk to work
+raw_data <-
+  suppressWarnings(suppressMessages(
+    # suppresses annoying parsing error warnings/messages
+    read_delim(
+      bmdfiles,
+      skip = 2,
+      #Warning: The BMDEXPRESS3-CMD output is formatted slightly differently than the GUI output
+      delim = "\t",
+      col_select = c(
+        "Probe ID",
+        "Genes Symbols",
+        "Best BMD",
+        "Best BMDL",
+        "Best BMDU",
+        "Best fitPValue"
+      ),
+      show_col_types = FALSE
+    )
+  )) %>%
+  dplyr::rename(
+    BMD = "Best BMD",
+    BMDL = "Best BMDL",
+    BMDU = "Best BMDU",
+    fitPValue = "Best fitPValue"
+  ) %>%
+  as.data.frame()
+
+####Category BMD data####
+category_raw_data <- data.table::fread(
+  categoryfiles,
+  skip = 2,                # Skip the first two lines
+  sep = "\t",              # Tab as the delimiter
+  na.strings = c("", "NA"), # Define what should be treated as NA
+  fill = TRUE,             # Fill missing values
+  quote = ""               # Ensure semicolons are not treated as special
+)
+
+####GO BMD data####
+go_raw_data <- category_raw_data %>%
+  dplyr::filter(stringr::str_detect(Analysis, "GO")) %>%
+  dplyr::rename(
+    GO.Pathway.Gene.Set.Gene.ID = "GO/Pathway/Gene Set/Gene ID",
+    GO.Level = "GO Level",
+    GO.Pathway.Gene.Set.Gene.Name = "GO/Pathway/Gene Set/Gene Name",
+    All.Genes..Expression.Data. = "All Genes (Expression Data)",
+    Genes.That.Passed.All.Filters = "Genes That Passed All Filters",
+    Fisher.s.Exact.Two.Tail = "Fisher's Exact Two Tail",
+    BMD.Mean = "BMD Mean",
+    BMD.Median = "BMD Median",
+    BMD.List = "BMD List"
+  ) %>%
+  dplyr::select(
+    GO.Pathway.Gene.Set.Gene.ID,
+    GO.Level,
+    GO.Pathway.Gene.Set.Gene.Name,
+    All.Genes..Expression.Data.,
+    Genes.That.Passed.All.Filters,
+    Fisher.s.Exact.Two.Tail,
+    Percentage,
+    BMD.Mean,
+    BMD.Median,
+    BMD.List
+  )
+
+####GO BMD data####
+reactome_raw_data <- category_raw_data %>%
+  dplyr::filter(stringr::str_detect(Analysis, "REACTOME")) %>%
+  dplyr::rename(
+    GO.Pathway.Gene.Set.Gene.ID = "GO/Pathway/Gene Set/Gene ID",
+    GO.Pathway.Gene.Set.Gene.Name = "GO/Pathway/Gene Set/Gene Name",
+    All.Genes..Expression.Data. = "All Genes (Expression Data)",
+    Genes.That.Passed.All.Filters = "Genes That Passed All Filters",
+    Fisher.s.Exact.Two.Tail = "Fisher's Exact Two Tail",
+    BMD.Mean = "BMD Mean",
+    BMD.Median = "BMD Median",
+    BMD.List = "BMD List"
+  ) %>%
+  dplyr::select(
+    GO.Pathway.Gene.Set.Gene.ID,
+    GO.Pathway.Gene.Set.Gene.Name,
+    All.Genes..Expression.Data.,
+    Genes.That.Passed.All.Filters,
+    Fisher.s.Exact.Two.Tail,
+    Percentage,
+    BMD.Mean,
+    BMD.Median,
+    BMD.List
+  )
+```
+
+### Metadata tables {.tabset}
+
+#### Original metadata
+
+```{r metadata_table_1}
+metadata_table <- metadata %>%
+  dplyr::filter(!!sym(params$treatment_var) == chemname) %>%
+  dplyr::select(Run, Organism, Days, !!sym(params$treatment_var), !!sym(params$dose), DoseUnits) %>% # You may need to alter this if your metadata has different columnn names
+  dplyr::rename(Exposure_duration_days = Days)
+
+knitr::kable(metadata_table, caption = "Metadata for experiment before filtering") %>%
+  kable_styling(
+    bootstrap_options = "striped",
+    full_width = T,
+    position = "left"
+  ) %>%
+  kableExtra::scroll_box(width = "100%", height = "480px")
+```
+
+#### After QC filtering
+
+```{r metadata_table_2}
+metadata_table_2 <- metadata %>%
+   dplyr::filter(!!sym(params$treatment_var) == chemname) %>%
+  dplyr::select(Run, Organism, Days, !!sym(params$treatment_var), !!sym(params$dose), DoseUnits) %>% # You may need to alter this if your metadata has different columnn names
+  dplyr::rename(Exposure_duration_days = Days) %>%
+  dplyr::filter(Run %in% colnames(bmd_express_input[-1]))
+
+knitr::kable(metadata_table_2, caption = "Metadata for experiment after filtering") %>%
+  kable_styling(
+    bootstrap_options = "striped",
+    full_width = T,
+    position = "left"
+  ) %>%
+  kableExtra::scroll_box(width = "100%", height = "480px")
+```
+
+#### Final metadata
+
+Note: Single replicates in dose groups are removed before BMD modelling. The BMDExpress EPA BMDS software requires more than one replicate per dose in order to calculate saturated models from which the best AIC model is compared to using the likelihood-ratio test. The general goodness of fit (GGOF) p-value, a.k.a. the `fitPvalue`, essentially measures whether the best AIC model is significantly worse than the fully saturated model, which perfectly fits the data. However, the GGOF p-value fails when there are not enough replicates to calculate a mean and SD for each group (i.e., dose) because the saturated model requires the mean and SD for each group.
+
+```{r metadata_table_3}
+metadata_table_3 <- metadata_table_2 %>%
+   dplyr::filter(!!sym(params$treatment_var) == chemname) %>%
+  dplyr::select(Run, Organism, Days, !!sym(params$treatment_var), !!sym(params$dose), DoseUnits) %>% # You may need to alter this if your metadata has different columnn names
+  dplyr::filter(Run %in% colnames(bmd_express_input_modified[-1]))
+
+knitr::kable(metadata_table_3, caption = "Final metadata table for experiment after filtering and removing single replicates in each dose group") %>%
+  kable_styling(
+    bootstrap_options = "striped",
+    full_width = T,
+    position = "left"
+  ) %>%
+  kableExtra::scroll_box(width = "100%", height = "480px")
+```
+
+### {-}
+
+```{r metadata_table_4}
+metadata_table_n <- metadata_table %>%
+  group_by(!!sym(params$dose)) %>%
+  tally() %>%
+  rename(Replicates_before_QC_filtering = "n")
+
+metadata_table_n_after_filter <- metadata_table_2 %>%
+  group_by(!!sym(params$dose)) %>%
+  tally() %>%
+  rename(Replicates_after_QC_filtering = "n")
+
+metadata_table_n_after_handling_single_replicates <-
+  metadata_table_2 %>%
+  dplyr::filter(Run %in% colnames(bmd_express_input_modified[-1])) %>%
+  group_by(!!sym(params$dose)) %>%
+  tally() %>%
+  rename(Replicates_after_removing_single_reps = "n")
+
+metadata_table_tally_replicates <-
+  left_join(metadata_table_n,
+            metadata_table_n_after_filter)
+metadata_table_tally_replicates <-
+  left_join(
+    metadata_table_tally_replicates,
+    metadata_table_n_after_handling_single_replicates
+  )
+
+if (any(is.na(metadata_table_tally_replicates))) {
+  metadata_table_tally_replicates[is.na(metadata_table_tally_replicates)] <- 0
+  problematic_doses <- metadata_table_tally_replicates %>%
+  filter(Replicates_after_removing_single_reps == 0) %>%
+  pull(!!sym(params$dose))
+  message(paste0("Dose(s) dropped after removing single reps: ", paste(problematic_doses, collapse = ", ")))
+}
+
+knitr::kable(metadata_table_tally_replicates, caption = paste0("Number of replicate samples for each dose (", unique(metadata_table$DoseUnits), ")")) %>%
+  kable_styling(
+    bootstrap_options = "striped",
+    full_width = T,
+    position = "left"
+  ) %>%
+  kableExtra::scroll_box(width = "100%", height = "480px")
+```
+
+## Filtering the BMDs and categorical data {.tabset}
+
+```{r filtered_data, echo=FALSE, warning=FALSE, message=TRUE, eval=TRUE}
+# Standard: BMD/BMDL > 20, BMDU/BMDL > 40, BMDU/BMD > 20, BMD > lowdose, BMD < highdose
+raw_data_filtered_results <-
+  BMDfiltering(x = raw_data,
+               BMD.div.BMDL = params$BMD.div.BMDL,
+               BMDU.div.BMDL = params$BMDU.div.BMDL,
+               BMDU.div.BMD = params$BMDU.div.BMD,
+               lowdose = lowestdoses[which(lowestdoses[[params$treatment_var]] == params$chemical_name),][[params$dose]],
+               highdose = highestdoses[which(highestdoses[[params$treatment_var]] == params$chemical_name),][[params$dose]],
+               fitP = params$fitP
+  )
+
+raw_data_filtered <- raw_data_filtered_results$final %>%
+    dplyr::mutate(logBMD = log(BMD, params$logtransformationscale))
+
+if (nrow(raw_data_filtered) <= 0) {
+  message("No results remaining after applying filters. Consider relaxing thresholds...")
+  print("Filters applied -- ")
+  print(paste0(names(raw_data_filtered_results)[1], ": ", nrow(raw_data_filtered_results[[names(raw_data_filtered_results[1])]])))
+  print(paste0(names(raw_data_filtered_results)[2], ": ", nrow(raw_data_filtered_results[[names(raw_data_filtered_results[2])]])))
+  print(paste0(names(raw_data_filtered_results)[3], ": ", nrow(raw_data_filtered_results[[names(raw_data_filtered_results[3])]])))
+  print(paste0(names(raw_data_filtered_results)[4], ": ", nrow(raw_data_filtered_results[[names(raw_data_filtered_results[4])]])))
+  print(paste0(names(raw_data_filtered_results)[6], ": ", nrow(raw_data_filtered_results[[names(raw_data_filtered_results[6])]])))
+  print(paste0(names(raw_data_filtered_results)[6], ": ", nrow(raw_data_filtered_results[[names(raw_data_filtered_results[6])]])))
+  print(paste0(names(raw_data_filtered_results)[7], ": ", nrow(raw_data_filtered_results[[names(raw_data_filtered_results[7])]])))
+  print(paste0(names(raw_data_filtered_results)[8], ": ", nrow(raw_data_filtered_results[[names(raw_data_filtered_results[8])]])))
+  #Empty log transform obj
+  all_BMD_list_logtransformed <- list(list())
+} else {
+  #Log transformation
+all_BMD_list_logtransformed <- raw_data_filtered %>%
+  dplyr::select(logBMD) %>%
+  pull() %>%
+  list()
+}
+
+# GO-term Filtering
+# Two Tail Test < 0.05, genes that passed all filters > 3, GO Term level > 5
+go_raw_data_filtered_results <-
+  goterm_filtering(
+    x = go_raw_data,
+    p = params$categoryP,
+    min_gene = params$min_gene,
+    min_level = params$min_level
+  )
+
+go_raw_data_filtered <-
+  go_raw_data_filtered_results$final %>% dplyr::mutate(logBMD = log(BMD.Median, params$logtransformationscale)) %>%
+  arrange(logBMD)
+#Get list of BMDs based on lowest median values
+if (nrow(go_raw_data_filtered) > 0) {
+  go_BMD_list <- BMD_list_extraction(go_raw_data_filtered)
+  #Log transformation
+  go_BMD_list_logtransformed <- lapply(go_BMD_list, log, base = params$logtransformationscale)
+} else {
+  message("No results remaining after applying filters. Consider relaxing thresholds...")
+  print("Filters applied -- ")
+  print(paste0(names(go_raw_data_filtered_results)[1], ": ", nrow(go_raw_data_filtered_results[[names(go_raw_data_filtered_results[1])]])))
+  print(paste0(names(go_raw_data_filtered_results)[2], ": ", nrow(go_raw_data_filtered_results[[names(go_raw_data_filtered_results[2])]])))
+  print(paste0(names(go_raw_data_filtered_results)[3], ": ", nrow(go_raw_data_filtered_results[[names(go_raw_data_filtered_results[3])]])))
+  print(paste0(names(go_raw_data_filtered_results)[4], ": ", nrow(go_raw_data_filtered_results[[names(go_raw_data_filtered_results[4])]])))
+  print(paste0(names(go_raw_data_filtered_results)[5], ": ", nrow(go_raw_data_filtered_results[[names(go_raw_data_filtered_results[5])]])))
+  go_BMD_list_logtransformed <- list()
+}
+
+
+# Reactome Filtering
+# Two Tail Test < 0.05, genes that passed all filters > 3
+reactome_raw_data_filtered_results <-
+  reactome_filtering(x = reactome_raw_data,
+                     p = params$categoryP,
+                     min_gene = params$min_gene)
+
+reactome_raw_data_filtered <-
+  reactome_raw_data_filtered_results$final %>%
+  dplyr::mutate(logBMD = log(BMD.Median, params$logtransformationscale)) %>%
+  arrange(logBMD)
+#Get list of BMDs based on lowest median values
+if (nrow(reactome_raw_data_filtered > 0)) {
+  reactome_BMD_list <-
+    BMD_list_extraction(reactome_raw_data_filtered)
+  #Log transformation
+  reactome_BMD_list_logtransformed <-
+    lapply(reactome_BMD_list, log, base = params$logtransformationscale)
+} else {
+  message("No results remaining after applying filters. Consider relaxing thresholds...")
+  print("Filters applied -- ")
+  print(paste0(names(reactome_raw_data_filtered_results)[1], ": ", nrow(reactome_raw_data_filtered_results[[names(reactome_raw_data_filtered_results[1])]])))
+  print(paste0(names(reactome_raw_data_filtered_results)[2], ": ", nrow(reactome_raw_data_filtered_results[[names(reactome_raw_data_filtered_results[2])]])))
+  print(paste0(names(reactome_raw_data_filtered_results)[3], ": ", nrow(reactome_raw_data_filtered_results[[names(reactome_raw_data_filtered_results[3])]])))
+  print(paste0(names(reactome_raw_data_filtered_results)[4], ": ", nrow(reactome_raw_data_filtered_results[[names(reactome_raw_data_filtered_results[4])]])))
+  reactome_BMD_list_logtransformed <- list()
+}
+
+
+
+#Summarize the filter results
+#BMD summary
+# BMD Filtering Summary
+initial_rows <- nrow(raw_data_filtered_results$initial)
+filter_BMD_BMDL_rows <- nrow(raw_data_filtered_results$filter_BMD_BMDL)
+filter_BMDU_BMDL_rows <- nrow(raw_data_filtered_results$filter_BMDU_BMDL)
+filter_BMDU_BMD_rows <- nrow(raw_data_filtered_results$filter_BMDU_BMD)
+filter_lowdose_rows <- nrow(raw_data_filtered_results$filter_lowdose)
+filter_highdose_rows <- nrow(raw_data_filtered_results$filter_highdose)
+filter_fitP_rows <- nrow(raw_data_filtered_results$filter_fitP)
+final_rows <- nrow(raw_data_filtered_results$final)
+
+# Sequentially apply each filter and calculate remaining BMDs
+filtered_data_1 <- raw_data_filtered_results$initial %>%
+  dplyr::filter((BMD / BMDL < params$BMD.div.BMDL))
+filtered_data_1_rows <- nrow(filtered_data_1)
+filtered_data_2 <- filtered_data_1 %>%
+  dplyr::filter((BMDU / BMDL < params$BMDU.div.BMDL))
+filtered_data_2_rows <- nrow(filtered_data_2)
+filtered_data_3 <- filtered_data_2 %>%
+  dplyr::filter((BMD / BMDU < params$BMDU.div.BMD))
+filtered_data_3_rows <- nrow(filtered_data_3)
+filtered_data_4 <- filtered_data_3 %>%
+  dplyr::filter((BMD > lowestdoses[which(lowestdoses[[params$treatment_var]] == params$chemical_name),][[params$dose]] / 10))
+filtered_data_4_rows <- nrow(filtered_data_4)
+filtered_data_5 <- filtered_data_4 %>%
+  dplyr::filter((BMD <= highestdoses[which(highestdoses[[params$treatment_var]] == params$chemical_name),][[params$dose]]))
+filtered_data_5_rows <- nrow(filtered_data_5)
+filtered_data_6 <- filtered_data_5 %>%
+  dplyr::filter((fitPValue >= params$fitP))
+filtered_data_6_rows <- nrow(filtered_data_6)
+
+BMD_summary <- data.frame(
+  Filter = c("Initial", "BMD/BMDL", "BMDU/BMDL", "BMDU/BMD", "Lowdose", "Highdose", "FitP", "All"),
+  BMDs_Removed_From_Initial = c(0,
+                   initial_rows - filter_BMD_BMDL_rows,
+                   initial_rows - filter_BMDU_BMDL_rows,
+                   initial_rows - filter_BMDU_BMD_rows,
+                   initial_rows - filter_lowdose_rows,
+                   initial_rows - filter_highdose_rows,
+                   initial_rows - filter_fitP_rows,
+                   initial_rows - final_rows),
+  Total_BMDs_Removed = c(0,
+                    initial_rows - filtered_data_1_rows,
+                    initial_rows - filtered_data_2_rows,
+                    initial_rows - filtered_data_3_rows,
+                    initial_rows - filtered_data_4_rows,
+                    initial_rows - filtered_data_5_rows,
+                    initial_rows - filtered_data_6_rows,
+                    initial_rows - final_rows
+  ),
+  Total_BMDs_Remaining = c(initial_rows,
+                     filtered_data_1_rows,
+                     filtered_data_2_rows,
+                     filtered_data_3_rows,
+                     filtered_data_4_rows,
+                     filtered_data_5_rows,
+                     filtered_data_6_rows,
+                     final_rows)
+)
+# Calculate the percentage remaining based on the initial BMDs
+BMD_summary$Percentage_Remaining <- paste0(round((BMD_summary$Total_BMDs_Remaining / BMD_summary$Total_BMDs_Remaining[1]) * 100), "%")
+
+# GO-term Filtering Summary
+initial_rows_go <- nrow(go_raw_data_filtered_results$initial)
+filter_p_rows_go <- nrow(go_raw_data_filtered_results$filter_p)
+filter_min_gene_rows_go <- nrow(go_raw_data_filtered_results$filter_min_gene)
+filter_min_level_rows_go <- nrow(go_raw_data_filtered_results$filter_min_level)
+final_rows_go <- nrow(go_raw_data_filtered_results$final)
+
+# Sequentially apply each filter and calculate remaining pathways
+filtered_data_go_1 <- go_raw_data_filtered_results$initial %>%
+  dplyr::filter(Fisher.s.Exact.Two.Tail < params$categoryP)
+filtered_data_go_1_rows <- nrow(filtered_data_go_1)
+
+filtered_data_go_2 <- filtered_data_go_1 %>%
+  dplyr::filter(Genes.That.Passed.All.Filters >= params$min_gene)
+filtered_data_go_2_rows <- nrow(filtered_data_go_2)
+
+filtered_data_go_3 <- filtered_data_go_2 %>%
+  dplyr::filter(GO.Level >= params$min_level)
+filtered_data_go_3_rows <- nrow(filtered_data_go_3)
+
+GO_summary <- data.frame(
+  Filter = c("Initial", "Two Tail Test", "Min Gene", "Min GO Level", "All"),
+  Pathways_Removed = c(0,
+                   initial_rows_go - filter_p_rows_go,
+                   initial_rows_go - filter_min_gene_rows_go,
+                   initial_rows_go - filter_min_level_rows_go,
+                   initial_rows_go - final_rows_go),
+  Total_Pathways_Removed = c(0,
+                    initial_rows_go - filtered_data_go_1_rows,
+                    initial_rows_go - filtered_data_go_2_rows,
+                    initial_rows_go - filtered_data_go_3_rows,
+                    initial_rows_go - final_rows_go),
+  Pathways_Remaining = c(initial_rows_go,
+                         filtered_data_go_1_rows,
+                         filtered_data_go_2_rows,
+                         filtered_data_go_3_rows,
+                         final_rows_go)
+)
+# Calculate the percentage remaining based on the initial GO pathways
+GO_summary$Percentage_Remaining <- paste0(round((GO_summary$Pathways_Remaining / GO_summary$Pathways_Remaining[1]) * 100), "%")
+
+# Reactome Filtering Summary
+initial_rows_reactome <- nrow(reactome_raw_data_filtered_results$initial)
+filter_p_rows_reactome <- nrow(reactome_raw_data_filtered_results$filter_p)
+filter_min_gene_rows_reactome <- nrow(reactome_raw_data_filtered_results$filter_min_gene)
+final_rows_reactome <- nrow(reactome_raw_data_filtered_results$final)
+
+# Sequentially apply each filter and calculate remaining pathways
+filtered_data_reactome_1 <- reactome_raw_data_filtered_results$initial %>%
+  dplyr::filter(Fisher.s.Exact.Two.Tail <= params$categoryP)
+filtered_data_reactome_1_rows <- nrow(filtered_data_reactome_1)
+
+filtered_data_reactome_2 <- filtered_data_reactome_1 %>%
+  dplyr::filter(Genes.That.Passed.All.Filters >= params$min_gene)
+filtered_data_reactome_2_rows <- nrow(filtered_data_reactome_2)
+
+Reactome_summary <- data.frame(
+  Filter = c("Initial", "Two Tail Test", "Min Gene", "All"),
+  Pathways_Removed = c(0,
+                   initial_rows_reactome - filter_p_rows_reactome,
+                   initial_rows_reactome - filter_min_gene_rows_reactome,
+                   initial_rows_reactome - final_rows_reactome),
+  Total_Pathways_Removed = c(0,
+                    initial_rows_reactome - filtered_data_reactome_1_rows,
+                    initial_rows_reactome - filtered_data_reactome_2_rows,
+                    initial_rows_reactome - final_rows_reactome),
+  Pathways_Remaining = c(initial_rows_reactome,
+                         filtered_data_reactome_1_rows,
+                         filtered_data_reactome_2_rows,
+                         final_rows_reactome)
+)
+# Calculate the percentage remaining based on the initial Reactome pathways
+Reactome_summary$Percentage_Remaining <- paste0(round((Reactome_summary$Pathways_Remaining / Reactome_summary$Pathways_Remaining[1]) * 100), "%")
+```
+
+```{r save_allresults, echo = FALSE, warning = FALSE, message = FALSE}
+#RData
+saveRDS(raw_data_filtered_results, normalizePath(file.path(directory_path, "Outputs", paste0("raw_data_filtered_results_", chemname, ".RDS"))))
+# saveRDS(raw_data_filtered, normalizePath(file.path(directory_path, "Outputs", paste0("raw_data_filtered_final_results_with_logBMDs", chemname, ".RDS"))))
+saveRDS(go_raw_data_filtered_results, normalizePath(file.path(directory_path, "Outputs", paste0("go_raw_data_filtered_results_", chemname, ".RDS"))))
+saveRDS(go_raw_data_filtered, normalizePath(file.path(directory_path, "Outputs", paste0("go_raw_data_filtered_final_results_with_logBMDs", chemname, ".RDS"))))
+saveRDS(reactome_raw_data_filtered_results, normalizePath(file.path(directory_path, "Outputs", paste0("reactome_raw_data_filtered_results_", chemname, ".RDS"))))
+saveRDS(reactome_raw_data_filtered, normalizePath(file.path(directory_path, "Outputs", paste0("reactome_raw_data_filtered_final_results_with_logBMDs", chemname, ".RDS"))))
+saveRDS(BMD_summary, normalizePath(file.path(directory_path, "Outputs", paste0("BMD_summary_table", chemname, ".RDS"))))
+saveRDS(GO_summary, normalizePath(file.path(directory_path, "Outputs", paste0("GO_summary_table", chemname, ".RDS"))))
+saveRDS(Reactome_summary, normalizePath(file.path(directory_path, "Outputs", paste0("Reactome_summary_table", chemname, ".RDS"))))
+```
+
+### BMD Filtering
+
+```{r filter_results_table_BMD, echo=FALSE, warning=FALSE, message=FALSE}
+kable(BMD_summary, caption = "Summary of BMD Filtering") %>%
+  kable_styling(
+    bootstrap_options = "striped",
+    full_width = T,
+    position = "left"
+  ) %>%
+  kableExtra::scroll_box(width = "100%", height = "480px") %>%
+  footnote(general = "This table summarizes the results of BMD filtering. Default filtering thresholds are set to NTP guidelines.",
+           symbol = "Note: 'Remaining' values are based on the initial number of BMDS.")
+```
+
+```{r vtree_BMDs, echo=FALSE, warning=FALSE, message=FALSE, fig.width=3, fig.height=6}
+# Reformat the data so that filters are column names and BMDs remaining are the values
+reformatted_BMD_summary <- t(BMD_summary[, c("Filter", "Total_BMDs_Remaining", "Percentage_Remaining")])
+colnames(reformatted_BMD_summary) <- reformatted_BMD_summary[1, ]
+reformatted_BMD_summary <- reformatted_BMD_summary[-1, , drop = FALSE]
+# Convert to a data frame
+reformatted_BMD_summary <- as.data.frame(reformatted_BMD_summary, stringsAsFactors = FALSE)
+reformatted_BMD_summary[1,] <- lapply(reformatted_BMD_summary[1,], as.numeric)
+
+# Create color scale function based on percentage remaining
+get_color <- function(percentage) {
+  color <- colorRampPalette(c("yellow", "lightblue"))(100)
+   # Ensure percentage values are within the range 0-100
+  percentage <- pmin(pmax(round(percentage), 0), 100)
+  return(color[percentage])
+}
+
+# Get colors based on percentage remaining
+node_colors <- get_color(as.numeric(sub("%", "", reformatted_BMD_summary[2, ])))
+# If node_colors has fewer values than reformatted_BMD_summary, pad with gray
+if (length(node_colors) < length(names(reformatted_BMD_summary))) {
+  node_colors <- c(node_colors, rep("#808080", length(names(reformatted_BMD_summary)) - length(node_colors)))
+}
+# Create a named list for custom fill colors in vtree
+custom_colors <- setNames(as.list(node_colors), names(reformatted_BMD_summary))
+
+vtree(data = reformatted_BMD_summary, 
+      vars = c(colnames(reformatted_BMD_summary)),
+      horiz = FALSE,
+      showpct = FALSE,
+      showcount = FALSE,
+      thousands = ",",
+      showroot = TRUE,
+      title = "Remaining BMDs after each filter",
+      fillcolor = custom_colors,
+      colorvarlabels = FALSE,
+      pngknit = FALSE)
+```
+
+### GO term filtering
+
+```{r filter_results_table_GO, echo=FALSE, warning=FALSE, message=FALSE}
+kable(GO_summary, caption = "Summary of GO term Filtering") %>%
+  kable_styling(
+    bootstrap_options = "striped",
+    full_width = T,
+    position = "left"
+  ) %>%
+  kableExtra::scroll_box(width = "100%", height = "480px") %>%
+  footnote(general = "This table summarizes the results of GO term filtering. Default filtering thresholds are set to NTP guidelines.",
+           symbol = "Note: 'Remaining' values are based on the initial number of GO terms.")
+```
+
+```{r vtree_GO, echo=FALSE, warning=FALSE, message=FALSE, fig.width=3, fig.height=6}
+# Reformat the data for vtree
+reformatted_GO_summary <- t(GO_summary[, c("Filter", "Pathways_Remaining", "Percentage_Remaining")])
+colnames(reformatted_GO_summary) <- reformatted_GO_summary[1, ]
+reformatted_GO_summary <- reformatted_GO_summary[-1, , drop = FALSE]
+reformatted_GO_summary <- as.data.frame(reformatted_GO_summary, stringsAsFactors = FALSE)
+reformatted_GO_summary[1,] <- lapply(reformatted_GO_summary[1,], as.numeric)
+
+# Generate colors based on the percentage remaining
+node_colors_GO <- get_color(as.numeric(sub("%", "", reformatted_GO_summary[2, ])))
+# If node_colors has fewer values than reformatted_BMD_summary, pad with gray
+if (length(node_colors_GO) < length(names(reformatted_GO_summary))) {
+  node_colors_GO <- c(node_colors_GO, rep("#808080", length(names(reformatted_GO_summary)) - length(node_colors_GO)))
+}
+custom_colors_GO <- setNames(as.list(node_colors_GO), names(reformatted_GO_summary))
+
+# Create the vtree plot for GO filtering
+vtree(data = reformatted_GO_summary, 
+      vars = c(colnames(reformatted_GO_summary)),
+      horiz = FALSE,
+      showpct = FALSE,
+      showcount = FALSE,
+      thousands = ",",
+      showroot = TRUE,
+      title = "Remaining GO Pathways after each filter",
+      fillcolor = custom_colors_GO,
+      colorvarlabels = FALSE,
+      pngknit = FALSE)
+```
+
+
+### REACTOME filtering
+
+```{r filter_results_table_REACTOME, echo=FALSE, warning=FALSE, message=FALSE}
+kable(Reactome_summary, caption = "Summary of Reactome pathway Filtering") %>%
+  kable_styling(
+    bootstrap_options = "striped",
+    full_width = T,
+    position = "left"
+  ) %>%
+  kableExtra::scroll_box(width = "100%", height = "480px") %>%
+  footnote(general = "This table summarizes the results of REACTOME pathway filtering. Default filtering thresholds are set to NTP guidelines.",
+           symbol = "Note: 'Remaining' values are based on the initial number of REACTOME pathways.")
+```
+
+```{r vtree_reactome, echo=FALSE, warning=FALSE, message=FALSE, fig.width=3, fig.height=6}
+# Reformat the data for vtree
+reformatted_Reactome_summary <- t(Reactome_summary[, c("Filter", "Pathways_Remaining", "Percentage_Remaining")])
+colnames(reformatted_Reactome_summary) <- reformatted_Reactome_summary[1, ]
+reformatted_Reactome_summary <- reformatted_Reactome_summary[-1, , drop = FALSE]
+reformatted_Reactome_summary <- as.data.frame(reformatted_Reactome_summary, stringsAsFactors = FALSE)
+reformatted_Reactome_summary[1,] <- lapply(reformatted_Reactome_summary[1,], as.numeric)
+
+# Generate colors based on the percentage remaining
+node_colors_Reactome <- get_color(as.numeric(sub("%", "", reformatted_Reactome_summary[2, ])))
+# If node_colors has fewer values than reformatted_BMD_summary, pad with gray
+if (length(node_colors_Reactome) < length(names(reformatted_Reactome_summary))) {
+  node_colors_Reactome <- c(node_colors_Reactome, rep("#808080", length(names(reformatted_Reactome_summary)) - length(node_colors_Reactome)))
+}
+custom_colors_Reactome <- setNames(as.list(node_colors_Reactome), names(reformatted_Reactome_summary))
+
+# Create the vtree plot for Reactome filtering
+vtree(data = reformatted_Reactome_summary, 
+      vars = c(colnames(reformatted_Reactome_summary)),
+      horiz = FALSE,
+      showpct = FALSE,
+      showcount = FALSE,
+      thousands = ",",
+      showroot = TRUE,
+      title = "Remaining Reactome Pathways after each filter",
+      fillcolor = custom_colors_Reactome,
+      colorvarlabels = FALSE,
+      pngknit = FALSE)
+
+```
+
+
+## {-}
+
+After filtering the BMDs for only those with:
+
+* a BMD/BMDL ratio less than `r params$BMD.div.BMDL`, 
+* a BMDU/BMDL ratio less than `r params$BMDU.div.BMDL`, 
+* a BMDU/BMD ratio less than `r params$BMDU.div.BMD`, 
+* a fitP value greater than `r params$fitP`,
+* and limiting BMDs to those not lower than the lowest dose, `r lowestdoses[[params$dose]][lowestdoses[[params$treatment_var]]==chemname]` divided by ten and those not higher than the highest dose, `r highestdoses[[params$dose]][highestdoses[[params$treatment_var]]==chemname]`...
+
+
+... `r nrow(raw_data) - nrow(raw_data_filtered)` BMDs were removed from the initial total of `r nrow(raw_data)`, *leaving `r nrow(raw_data_filtered)` filtered BMDs*.
+
+---
+
+After filtering the categorical GO terms for only those with:
+
+* a Fisher's exact two-tail test p value greater than or equal to `r params$categoryP`,
+* at least `r params$min_gene` gene BMDs per GO term,
+* and minimum GO level of `r params$min_level`...
+
+... `r nrow(go_raw_data) - nrow(go_raw_data_filtered)` GO terms were removed from the initial total of `r nrow(go_raw_data)`, *leaving `r nrow(go_raw_data_filtered)` filtered GO terms*.
+
+---
+
+After filtering the categorical REACTOME pathways for only those with:
+
+* a Fisher's exact two-tail test p value greater than or equal to `r params$categoryP`,
+* and at least `r params$min_gene` gene BMDs per REACTOME pathway.
+
+... `r nrow(reactome_raw_data) - nrow(reactome_raw_data_filtered)` REACTOME pathways were removed from the initial total of `r nrow(reactome_raw_data)`, *leaving `r nrow(reactome_raw_data_filtered)` filtered REACTOME pathways*. 
+
+---
+
+# Results
+
+## Calculate the tPODs
+
+Several gene-level tPODs were calculated...
+
+* The lowest consistent response dose (LCRD)
+* The 20th gene
+* The tenth percentile
+* The first mode
+
+and category-level tPODs also...
+
+* The median BMD of the first GO term
+* The median BMD of the first REACTOME pathway
+
+```{r gene_level_tPOD_calculation, warning=FALSE, echo=FALSE}
+#### MODE ANALYSIS #####
+
+# calculate modes
+dataModes <-
+  mode.antimode(
+    raw_data_filtered$logBMD,
+    min.size = params$min_dense,
+    bw = params$bwFun,
+    min.bw = params$min_bw
+  )
+
+
+if (any(is.na(dataModes))) {
+  histBreaks <- NA
+} else {
+  histBreaks <- seq(
+    from = min(raw_data_filtered$logBMD) - dataModes$bw,
+    to = max(raw_data_filtered$logBMD) + dataModes$bw,
+    by = dataModes$bw
+  )
+}
+# histogram plot with modes/antimodes using the same bandwidth as the mode algorithm
+
+tpod_values <-  data.frame(chemical = chemname)
+
+#first mode tPoD
+tpod_values[, "first_mode"] <- dataModes$modes[1]
+
+#calculate 10th percentile tPoD
+tpod_values[, "10th_percentile"] <- raw_data_filtered[, "BMD"] %>%
+  quantile(probs = 0.1) %>% log(base = params$logtransformationscale)
+
+#calculate 20th gene tPoD
+if (length(raw_data_filtered[, "BMD"]) >= 20) {
+  tpod_values[, "20th_gene"] <- raw_data_filtered[, "BMD"] %>%
+    Rfast::nth(20, descending = FALSE) %>% log(base = params$logtransformationscale)
+} else {
+  print("Less than 20 genes available... 20th gene tPOD will be NA")
+  tpod_values[, "20th_gene"] <- NA
+}
+
+#Calculate the LCRD
+if (nrow(raw_data_filtered) > 0) {
+result <- LCRD(bmc = raw_data_filtered$BMD, probe = raw_data_filtered$`Probe ID`, cut = params$lcrdratiocut)
+
+#LCRD tPoD
+tpod_values[, "lcrd"] <- result$LCRD_Result["logBMC"][[1]]
+} else {
+  #LCRD tPoD
+tpod_values[, "lcrd"] <- NA
+}
+
+```
+
+```{r tPOD_table}
+knitr::kable(
+  tpod_values[c("chemical", "lcrd", "20th_gene", "10th_percentile", "first_mode")],
+  row.names = F,
+  col.names = c(
+    "Chemical of interest",
+    "Lowest consistent response dose tPOD",
+    "Twentieth gene tPOD",
+    "Tenth percentile tPOD",
+    "First mode tPOD"
+  ),
+  caption = paste0("tPOD values log", params$logtransformationscale, " transformed ", "(", unique(metadata$DoseUnits), ")")
+) %>%
+  kable_styling(
+    bootstrap_options = "striped",
+    full_width = F,
+    position = "left"
+  ) %>%
+  scroll_box(height = "480px")
+```
+
+```{r write_tPOD_table, include=FALSE, warning=FALSE, message=FALSE}
+# export tPoDs
+write.table(tpod_values, file = normalizePath(file.path(directory_path, "Outputs", paste0("tpod_values", chemname, ".txt"))), 
+            quote = FALSE, 
+            row.names = F,
+            sep = "\t")
+####Export Data#### 
+saveRDS(go_BMD_list_logtransformed, normalizePath(file.path(directory_path, "Outputs", paste0("go_BMD_list_logtransformed_R-ODAF_DEGs", chemname, ".RDS"))))
+saveRDS(reactome_BMD_list_logtransformed, normalizePath(file.path(directory_path, "Outputs", paste0("reactome_BMD_list_logtransformed_R-ODAF_DEGs", chemname, ".RDS"))))
+saveRDS(all_BMD_list_logtransformed, normalizePath(file.path(directory_path, "Outputs", paste0("all_BMD_list_logtransformed_R-ODAF_DEGs", chemname, ".RDS"))))
+saveRDS(raw_data_filtered, normalizePath(file.path(directory_path, "Outputs", paste0("raw_data_filtered_", chemname, ".RDS"))))
+```
+
+## Plots {.tabset}
+
+### Gene-level
+
+```{r gene_level_accumulation_plot, echo=FALSE, warnings = FALSE, fig.height = 8, fig.width = 10, out.width = '100%', fig.cap = "Accumulation of log gene BMDs"}
+# Calculate accumulation plot data
+accumulation_data <- raw_data_filtered %>%
+  arrange(logBMD) %>%
+  mutate(CumulativeCount = row_number())
+
+if (nrow(accumulation_data) > 0) {
+
+# Maximum x and y-values for multi plotting
+max_y <- max(accumulation_data$CumulativeCount, na.rm = TRUE)
+max_x <- max(accumulation_data$logBMD, na.rm = TRUE)
+min_x <- min(accumulation_data$logBMD, na.rm = TRUE)
+
+# Create the accumulation plot
+accumulation_plot <- ggplot(accumulation_data, aes(x = logBMD, y = CumulativeCount)) +
+  # x and y scales
+  scale_x_continuous(
+    limits = c(
+      log(((lowestdoses[[params$dose]][lowestdoses[[params$treatment_var]] == chemname]) / 10), base = params$logtransformationscale),
+      log((highestdoses[[params$dose]][lowestdoses[[params$treatment_var]] == chemname]), base = params$logtransformationscale)
+    ),
+    oob = function(x, limits) x
+  ) +
+  scale_y_continuous(limits = c(0, max_y), expand = c(0, 0)) +
+  
+  # Plot data
+  geom_line(size = 1.5, color = "blue") +
+  
+  # Lines with legend
+  geom_vline(aes(
+    xintercept = tpod_values[tpod_values$chemical == chemname, "first_mode"],
+    color = "First Mode",
+    linetype = "First Mode"
+  ), size = 0.8) +
+  geom_vline(aes(
+    xintercept = tpod_values[tpod_values$chemical == chemname, "10th_percentile"],
+    color = "10th Percentile",
+    linetype = "10th Percentile"
+  ), size = 0.8) +
+  geom_vline(aes(
+    xintercept = tpod_values[tpod_values$chemical == chemname, "20th_gene"],
+    color = "20th Gene",
+    linetype = "20th Gene"
+  ), size = 0.8) +
+  geom_vline(aes(
+    xintercept = tpod_values[tpod_values$chemical == chemname, "lcrd"],
+    color = "LCRD",
+    linetype = "LCRD"
+  ), size = 0.8) +
+  geom_vline(aes(
+    xintercept = log((lowestdoses[[params$dose]][lowestdoses[[params$treatment_var]] == chemname]), base = params$logtransformationscale),
+    color = "Lowest Dose",
+    linetype = "Lowest Dose"
+  ), size = 0.8) +
+  
+  # Labels
+  labs(
+    title = paste0(chemname, " (n=", nrow(raw_data_filtered), " genes)"),
+    x = paste0("logBMD ", "(", unique(metadata$DoseUnits), ")"),
+    y = "Cumulative Count"
+  ) +
+  scale_color_manual(
+    name = "Lines",
+    values = c(
+      "First Mode" = "green",
+      "10th Percentile" = "turquoise",
+      "20th Gene" = "blue",
+      "LCRD" = "hotpink",
+      "Lowest Dose" = "grey"
+    )
+  ) +
+  scale_linetype_manual(
+    name = "Lines",
+    values = c(
+      "First Mode" = "dashed",
+      "10th Percentile" = "dotted",
+      "20th Gene" = "dotdash",
+      "LCRD" = "longdash",
+      "Lowest Dose" = "solid"
+    )
+  ) +
+  
+  # Theme with legend at top
+  theme_classic() +
+  theme(plot.title = element_text(hjust = 0.5, size = 12),
+        legend.position = "top")
+
+# Print the plot
+print(accumulation_plot)
+} else {
+  print("No results to plot.")
+}
+```
+
+```{r gene_level_plot_histogram, echo=FALSE, warnings = TRUE, fig.height = 8, fig.width = 10, out.width = '100%', fig.cap = "Distribution of log gene BMDs"}
+if (nrow(raw_data_filtered) > 0) {
+
+# historgram plot params
+if (any(is.na(histBreaks))) {
+  dataHist <-
+    data.frame(x = log(
+      (highestdoses %>% dplyr::filter(!!sym(params$treatment_var) == chemname) %>% pull(!!sym(params$dose))), base = params$logtransformationscale
+    ),
+    y = NA)
+} else {
+  dataHist <- hist(raw_data_filtered$logBMD,
+                   breaks = histBreaks,
+                   plot = FALSE)
+  dataHist <-
+    data.frame(x = dataHist$mids, y = dataHist$count)
+}
+
+# maximum x and y-values for multi plotting (highest freq value)
+max_y <- max(dataHist$y, na.rm = TRUE)
+
+# Density plot values
+dataDens <- list()
+if (!is.na(dataModes$modes[1])) {
+  dataDens <- density(raw_data_filtered$logBMD, bw = dataModes$bw)
+  dataDens$y <- (dataDens$y / max(dataDens$y) * max(dataHist$y))/2 #Scaling
+  dataDens <- data.frame(x = dataDens$x, y = dataDens$y)
+} else {
+  dataDens <- data.frame(x = log(
+    (highestdoses %>% dplyr::filter(!!sym(params$treatment_var) == chemname) %>% pull(!!sym(params$dose))), base = params$logtransformationscale
+  ), y = NA)
+}
+
+histPlots <- ggplot(raw_data_filtered, aes(x = logBMD)) +
+  # x and y scales
+  scale_x_continuous(
+    limit = c(log(((lowestdoses[[params$dose]][lowestdoses[[params$treatment_var]] == chemname]) / 10), base = params$logtransformationscale),
+              log((highestdoses[[params$dose]][lowestdoses[[params$treatment_var]] == chemname]), base = params$logtransformationscale)),
+    oob = function(x, limits)
+      x
+  ) + # i know this is a weird line... apparently there is a minor bug with just using "xlim" for histograms
+  scale_y_continuous(limit = c(0, max_y), expand = c(0, 0)) +
+  # plot data
+  {
+    if (!is.null(dataModes$bw))
+      geom_histogram(binwidth = dataModes$bw,
+                     color = "black",
+                     fill = NA)
+  } +
+  {
+    if (suppressWarnings(!any(is.na(dataDens))))
+      geom_line(
+        data = dataDens,
+        aes(x = x, y = y),
+        inherit.aes = FALSE,
+        size = 1.5,
+        color = hsv(0.5, 1, 0.8, 0.4)
+      )
+  } +
+  # lines with legend
+  geom_vline(aes(
+    xintercept = tpod_values[tpod_values$chemical == chemname, "first_mode"],
+    color = "First Mode",
+    linetype = "First Mode"
+  ),
+  size = 0.8) +
+  geom_vline(
+    aes(
+      xintercept = tpod_values[tpod_values$chemical == chemname, "10th_percentile"],
+      color = "10th Percentile",
+      linetype = "10th Percentile"
+    ),
+    size = 0.8
+  ) +
+  geom_vline(aes(
+    xintercept = tpod_values[tpod_values$chemical == chemname, "20th_gene"],
+    color = "20th Gene",
+    linetype = "20th Gene"
+  ),
+    size = 0.8
+  ) +
+  geom_vline(aes(
+    xintercept = tpod_values[tpod_values$chemical == chemname, "lcrd"],
+    color = "LCRD",
+    linetype = "LCRD"
+  ), size = 0.8) +
+  geom_vline(aes(
+    xintercept = log((lowestdoses[[params$dose]][lowestdoses[[params$treatment_var]] == chemname]), base = params$logtransformationscale),
+    color = "Lowest Dose",
+    linetype = "Lowest Dose"
+  ), size = 0.8) +
+  
+  # Labels
+  labs(
+    title = paste0(chemname, " (n=", nrow(raw_data_filtered), " genes)"),
+    x = paste0("logBMD ", "(", unique(metadata$DoseUnits), ")"),
+    y = "Count"
+  ) +
+  scale_color_manual(
+    name = "Lines",
+    values = c(
+      "First Mode" = "green",
+      "10th Percentile" = "turquoise",
+      "20th Gene" = "blue",
+      "LCRD" = "hotpink",
+      "Lowest Dose" = "grey"
+    )
+  ) +
+  scale_linetype_manual(
+    name = "Lines",
+    values = c(
+      "First Mode" = "dashed",
+      "10th Percentile" = "dotted",
+      "20th Gene" = "dotdash",
+      "LCRD" = "longdash",
+      "Lowest Dose" = "solid"
+    )
+  ) +
+  
+  # Theme with legend at top
+  theme_classic() +
+  theme(plot.title = element_text(hjust = 0.5, size = 12),
+        legend.position = "top")
+
+# Print the plot
+print(histPlots)
+} else {
+  print("No results to plot.")
+}
+```
+
+### Gene category - GO terms
+
+```{r GO_accumulation_plot, echo=FALSE, warnings = TRUE, fig.height = 8, fig.width = 10, out.width = '100%', fig.cap = "Accumulation of Gene Ontology biological processes with at least 3 gene BMDs"}
+
+if (nrow(go_raw_data_filtered) > 0) {
+# Rank the data by logBMD
+go_raw_data_filtered <- go_raw_data_filtered %>%
+  dplyr::group_by(logBMD) %>%
+  dplyr::mutate(rank = min_rank(logBMD)) %>%
+  dplyr::ungroup() %>%
+  dplyr::group_by(rank) %>%
+  dplyr::mutate(rank_count = row_number()) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(count = row_number()) %>%
+  dplyr::mutate(GO.Level = as.factor(GO.Level))
+
+# Calculate max_y for the plot
+max_y <- nrow(go_raw_data_filtered)
+
+# Define x-axis limits
+min_x <- log(((lowestdoses[[params$dose]][lowestdoses[[params$treatment_var]] == chemname]) / 10), base = params$logtransformationscale)
+max_x <- log((highestdoses[[params$dose]][lowestdoses[[params$treatment_var]] == chemname]), base = params$logtransformationscale)
+
+# Create the plot
+goPlot <- ggplot(go_raw_data_filtered, aes(x = logBMD, y = rank_count)) + 
+  # x and y axis lims
+  xlim(min_x, max_x) +
+  ylim(0, max_y) +
+  # plot data
+  geom_line(size = 2, col = "orange") +  
+  geom_point(size = 3, stroke = 2, shape = 22, col = "orange", fill = "white") +
+  geom_vline(xintercept = min(go_raw_data_filtered$logBMD), linetype = "dashed", color = "yellow4") +
+  # labels
+  labs(title = paste0(chemname, " (n=", nrow(go_raw_data_filtered), " GO terms)"), x = paste0("logBMD ", "(", unique(metadata$DoseUnits), ")"), y = "Cumulative GO terms") +
+  # theme
+  theme_classic() +
+  theme(plot.title = element_text(hjust = 0.5, size = 12))
+
+# Print the plot
+print(goPlot)
+} else {
+  print("No results to plot.")
+}
+```
+
+### Gene category - REACTOME pwathways
+
+```{r reactome_accumulation_plot, echo=FALSE, warnings = TRUE, fig.height = 8, fig.width = 10, out.width = '100%', fig.cap = "Accumulation of REACTOME pathways with at least 3 gene BMDs"}
+
+if (nrow(reactome_raw_data_filtered) > 0) {
+# This is how BMD express does it
+# ranking by logBMD
+reactome_raw_data_filtered <- reactome_raw_data_filtered %>%
+  dplyr::group_by(logBMD) %>%
+  dplyr::mutate(rank = min_rank(logBMD)) %>%
+  dplyr::ungroup() %>%
+  dplyr::group_by(rank) %>%
+  dplyr::mutate(rank_count = row_number()) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(count = row_number())
+
+#max y value is the number of rows in filtered reactome data
+max_y <- nrow(reactome_raw_data_filtered)
+
+
+reactomePlots <-
+  ggplot(reactome_raw_data_filtered, aes(x = logBMD, y = rank_count)) + # can plot by "rank" or "count"
+  # x and y axis lims
+  xlim(c(log(((lowestdoses[[params$dose]][lowestdoses[[params$treatment_var]] == chemname]) / 10), base = params$logtransformationscale),
+         log((highestdoses[[params$dose]][lowestdoses[[params$treatment_var]] == chemname]), base = params$logtransformationscale))) +
+  ylim(0, max_y) +
+  # plot data
+  geom_line(size = 2, col = "orange") +
+  geom_point(
+    size = 3,
+    stroke = 2,
+    col = "orange",
+    shape = 22,
+    fill = "white"
+  ) +
+  geom_vline(
+    xintercept = min(reactome_raw_data_filtered$logBMD),
+    linetype = "dashed",
+    color = "red"
+  ) +
+  # labels
+  labs(
+    title = paste0(chemname, " (n=", nrow(reactome_raw_data_filtered), " pathways)"),
+    x = paste0("logBMD ", "(", unique(metadata$DoseUnits), ")"),
+    y = "Cumulative REACTOME Pathways"
+  ) +
+  #theme
+  theme_classic() +
+  theme(plot.title = element_text(hjust = 0.5, size = 12))
+
+print(reactomePlots)
+} else {
+  print("No results to plot.")
+}
+
+```
+
+```{r write_and_save, include = FALSE, message = FALSE, warning = FALSE}
+write_csv(go_raw_data_filtered, file = normalizePath(file.path(directory_path, "Outputs", paste0("GO_Data_R-ODAF_DEGs", chemname, ".csv"))))
+write_csv(reactome_raw_data_filtered, file = normalizePath(file.path(directory_path, "Outputs", paste0("Reactome_Data_R-ODAF_DEGs", chemname, ".csv"))))
+write_csv(raw_data_filtered, file = normalizePath(file.path(directory_path, "Outputs", paste0("BMD_Data_for_Histogram_R-ODAF_DEGs", chemname, ".csv"))))
+if (nrow(raw_data_filtered) > 0) {ggsave(histPlots, path = normalizePath(file.path(directory_path, "Outputs")), filename = paste0("BMD_Histogram", chemname, ".pdf"))}
+if (nrow(reactome_raw_data_filtered) > 0) {ggsave(reactomePlots, path = normalizePath(file.path(directory_path, "Outputs")), filename = paste0("REACTOME_accumulation_plot", chemname, ".pdf"))}
+if (nrow(go_raw_data_filtered) > 0) {ggsave(goPlot, path = normalizePath(file.path(directory_path, "Outputs")), filename = paste0("GO_accumulation_plot", chemname, ".pdf"))}
+```
+
+## {-}
+
+## Summary of results bootstrapped
+
+```{r bootstrapping_results, echo=FALSE}
+raw_data_filtered <-
+  readRDS(normalizePath(file.path(
+    directory_path,
+    "Outputs",
+    paste0("raw_data_filtered_", chemname, ".RDS")
+  )))
+
+goBMDvalues <- go_BMD_list_logtransformed
+reactomeBMDvalues <- reactome_BMD_list_logtransformed
+logBMDvalues <- all_BMD_list_logtransformed
+
+# Process bootstrapping results for a single chemical
+bootstrap_results <-
+  function(logBMDvalues, func, endpoint_name, ...) {
+    results <- as.data.frame(t(func(logBMDvalues, ...))) %>%
+      dplyr::mutate(endpoint = endpoint_name) %>%
+      dplyr::mutate(chemical = chemname) %>%
+      relocate(chemical, endpoint)
+    
+    return(results)
+  }
+
+# Bootstrapping results for different endpoints
+if (length(logBMDvalues[[1]]) > 0) {
+  nthgenelist <-
+    bootstrap_results(logBMDvalues, nth_gene_bootstrap, "20th gene")
+  Sys.sleep(5)
+  nthpercentlist <-
+    bootstrap_results(logBMDvalues, nth_percent_bootstrap, "10th pct")
+  Sys.sleep(5)
+  modelist <-
+    bootstrap_results(logBMDvalues, mode_bootstrap, "1st Mode", min_size = params$min_dense, min_bw = params$min_bw)
+  Sys.sleep(5)
+} else {
+  nthgenelist <-
+    tibble(
+      chemical = chemname,
+      endpoint = "20th gene",
+      "2.5%" = NA_real_,
+      "50%" = NA_real_,
+      "97.5%" = NA_real_
+    )
+  nthpercentlist <-
+    tibble(
+      chemical = chemname,
+      endpoint = "10th pct",
+      "2.5%" = NA_real_,
+      "50%" = NA_real_,
+      "97.5%" = NA_real_
+    )
+  modelist <-
+    tibble(
+      chemical = chemname,
+      endpoint = "1st Mode",
+      "2.5%" = NA_real_,
+      "50%" = NA_real_,
+      "97.5%" = NA_real_
+    )
+}
+if (nrow(raw_data_filtered) > 0) {
+  lcrdlist <-
+    bootstrap_results(
+      logBMDvalues = raw_data_filtered,
+      func = lcrd_bootstrap,
+      endpoint_name = "LCRD",
+      lcrdratiocut = params$lcrdratiocut,
+      lcrdlogbase = params$logtransformationscale
+    )
+  Sys.sleep(5)
+} else {
+  lcrdlist <-
+    tibble(
+      chemical = chemname,
+      endpoint = "LCRD",
+      "2.5%" = NA_real_,
+      "50%" = NA_real_,
+      "97.5%" = NA_real_
+    )
+}
+
+# Pathway analysis results
+pathway_bootstrap_results <-
+  function(values, func, endpoint_name) {
+    if (length(values) > 0) {
+      ci_values <- func(list(values))
+      termlist <- averageCI(list(ci_values))
+      # Creating a data frame with the results
+      result_df <- tibble(
+        chemical = chemname,
+        # Replace with actual chemical name if available
+        endpoint = endpoint_name,
+        "2.5%" = termlist["2.5%"],
+        "50%" = termlist["50%"],
+        "97.5%" = termlist["97.5%"]
+      )
+    } else {
+      # Handle missing values case
+      print("Missing values for the chemical")
+      result_df <- tibble(
+        chemical = chemname,
+        # Replace with actual chemical name if available
+        endpoint = endpoint_name,
+        "2.5%" = NA_real_,
+        "50%" = NA_real_,
+        "97.5%" = NA_real_
+      )
+    }
+    
+    return(result_df)
+  }
+
+#if (length(goBMDvalues) > 0) {
+gotermlist <-
+  pathway_bootstrap_results(goBMDvalues, pathway_bootstrap, "GO Term")
+#}
+#if (length(reactomeBMDvalues) > 0) {
+reactomelist <-
+  pathway_bootstrap_results(reactomeBMDvalues, pathway_bootstrap, "Reactome")
+#}
+
+# Summary
+bigtibble <-
+  bind_rows(lcrdlist,
+            nthgenelist,
+            nthpercentlist,
+            modelist,
+            gotermlist,
+            reactomelist) %>%
+  rename(lowerCI = "2.5%",
+         median = "50%",
+         upperCI = "97.5%") %>%
+  dplyr::mutate(missingvalues = if_else(is.na(median), "ND", "")) %>%
+  dplyr::mutate(endpoint = factor(
+    endpoint,
+    levels = c("Reactome",
+               "GO Term",
+               "1st Mode",
+               "10th pct",
+               "20th gene",
+               "LCRD")
+  )) %>%
+  dplyr::mutate(
+    low_conf = params$logtransformationscale ^ lowerCI,
+    median_POD = params$logtransformationscale ^ median,
+    high_conf = params$logtransformationscale ^ upperCI
+  )
+
+#write_csv(bigtibble, file = "tPOD_table.csv")
+```
+
+```{r bootstrapping_results_table, echo=FALSE}
+knitr::kable(
+  bigtibble,
+  row.names = F,
+  col.names = c(
+    "Chemical of interest",
+    "tPOD type",
+    "2.5% Low confidence interval (log)",
+    "Median (log)",
+    "97.5% upper confidence interval (log)",
+    "",
+    "2.5% low confidence interval (raw)",
+    "Median (raw)",
+    "97.5% upper confidence interval (raw)"
+  ),
+  caption = paste0(
+    "Summary of bootstrapped tPOD values ",
+    "(",
+    unique(metadata$DoseUnits),
+    ")"
+  )
+) %>%
+  kable_styling(
+    bootstrap_options = "striped",
+    full_width = F,
+    position = "left"
+  ) %>%
+  scroll_box(height = "480px")
+```
+
+```{r bootstrapping_results_plot, echo=FALSE, warnings = FALSE, fig.height = 8, fig.width = 10, out.width = '100%', fig.cap = "Summary of the bootstrapped results using sampling with replacement, 2000 iterations, a low confidence interval of 2.5% and upper confidence interval of 97.5%"}
+
+
+
+# Define x-axis limits
+min_x <- log(((lowestdoses[[params$dose]][lowestdoses[[params$treatment_var]] == chemname]) / 10), base = params$logtransformationscale)
+max_x <- log((highestdoses[[params$dose]][lowestdoses[[params$treatment_var]] == chemname]), base = params$logtransformationscale)
+
+# Plotting
+create_summary_plot <- function(df) {
+  df %>%
+    ggplot(aes(x = median, y = endpoint)) +
+    xlim(min_x, max_x) +
+    geom_point(size = 3, aes(colour = endpoint), show.legend = FALSE) +
+    geom_errorbarh(aes(xmin = lowerCI, xmax = upperCI, colour = endpoint), height = 0.3, size = 0.5, show.legend = FALSE) +
+    # Add ND labels for missing values
+    geom_text(aes(label = ifelse(missingvalues == "ND", "ND", "")), 
+              x = min_x, hjust = -0.5, vjust = 0.5) +
+    labs(title = paste0(unique(df$chemical), " (n=", length(logBMDvalues[[1]]), " genes)"), 
+         x = paste0("logBMD ", "(", unique(metadata$DoseUnits), ")"), 
+         y = "Endpoint") +
+    theme(plot.title = element_text(hjust = 0.5, size = 12)) +
+    theme_classic()
+}
+
+# Create and print the plot
+summary_plot <- create_summary_plot(bigtibble)
+print(summary_plot)
+```
+
+
+```{r save_summary_data, include = FALSE, warning = FALSE, message = FALSE}
+write_csv(bigtibble, file = normalizePath(file.path(directory_path, "Outputs", paste0("final_tPOD_table", chemname, ".csv"))))
+ggsave(summary_plot, path = normalizePath(file.path(directory_path, "Outputs")), filename = paste0("tPOD_Summary_Plot", chemname, ".pdf"))
+```
+
+# Session Info
+
+## Date the report was generated.
+
+```{r reproducibility1, echo = FALSE}
+## Date the report was generated
+Sys.time()
+```
+
+## Parameters Used
+
+From the list elements in each params${variable} used to generate this report.
+
+```{r paramsList, echo = FALSE}
+df <- as.data.frame(unlist(params))
+names(df) <- "Parameter Value"
+knitr::kable(as.data.frame(df), format = "markdown")
+```
+
+## Wallclock time spent generating the report.
+
+```{r reproducibility2, echo = FALSE}
+## Processing time in seconds
+totalTime <- diff(c(startTime, Sys.time()))
+round(totalTime, digits = 3)
+```
+
+## `R` session information.
+
+```{r reproducibility3, echo = FALSE}
+## Session info
+options(width = 120)
+session_info()
+```
+
+## Pandoc version used: `r rmarkdown::pandoc_version()`.

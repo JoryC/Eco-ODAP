@@ -1,0 +1,33 @@
+---
+params:
+  projectdir: !expr paste0("/mnt/", Sys.getenv("STUDY_ID_DIR"))
+  project_name: !expr Sys.getenv("STUDY_ID_DIR")
+  species: "zebrafish"                 # one of human, mouse, rat, hamster
+  design: "Dose"                # single experimental group of interest; entries in this column must match the contrast names.
+  intgroup: ["Dose"]            # experimental group of interest plus covariates; can be more than one
+  dose: "Dose"
+  nmr_threshold: 3000000 # 10% of 1M reads for TempOSeq = 100,000; 10% of 10M reads for RNA-Seq = 1,000,000.
+  fdr_threshold: 0.05 # false-disocvery rate cutoff for DEGs. Default to  0.01, but should probably relax to 0.05...
+  linear_fc_filter: 1.5 # The linear fold-change filter for DEGs.
+  MinCount: 1 #Should be default 1 for regular RNA-Seq data and 0.5 for something like TempO-Seq or a reduced transcriptome
+  nuisance: !expr NA                  # "Batch" To remove batch effects for PCA/Heatmaps visualiziations
+  flag: TRUE                     # runs all analysis by default when set to TRUE
+  platform: "RNA-Seq"            # RNA-Seq or TempO-Seq
+  group_facet: !expr NA       #!expr NA # If you have many different experimental groups, you may subset the report by specifying a column in the metadata to filter groups, and then setting the group of interest in group_filter
+  group_filter: !expr NA             # !expr NA # Which group will this report be done on?
+  strict_contrasts: TRUE         # Use both columns (exp, cont) of contrasts file to limit what is included in the report
+  exclude_samples: !expr NA      # Optionally, a vector of sample names to exclude from the analysis. E.g., ["Sample1", "Sample2"]
+  exclude_groups: !expr NA       # Optionally, a vector of groups to exclude from the analysis. By default this is assumed to be in the column specified by params$design. E.g., ["Dose1, "Dose2"]
+  include_only_column:  !expr NA # Restrict analysis to group(s) in the column listed here based on params$include_only_group.
+  include_only_group:  !expr NA  # Restrict analysis to this/these group(s) within the column listed in params$include_only_column
+  use_cached_RData: FALSE        # If possible, load the saved RData for dds object and gene IDs
+  cpus: !expr as.integer(Sys.getenv('SLURM_CPUS_PER_TASK')) # Set to a lower number (e.g., 2 to 4) if you aren't working in a server environment
+  run_pathway_analysis: FALSE     # Optionally disable pathway analysis if not available for your organism
+  wikipathways_directory: !expr NA
+  biospyder_dbs: !expr NA
+  nBestFeatures: 20              # The number of best features to make plots of their counts
+  nBest: 100                     # Number of features to include in table and limiting PCA/clustering analysis
+  nHeatmap: 50                   # Number of most variable genes for heatmap
+  nHeatmapDEGs: 50               # Number of DEGs for heatmap
+  sampledata_sep: "\t"           # Comma for TempO-Seq, Maybe tabs for RNASeq, customize!
+---
