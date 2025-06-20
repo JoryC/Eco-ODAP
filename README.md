@@ -79,6 +79,7 @@ However, if after reviewing the output report, you would like to change specific
 
 ### Dependencies
 
+- docker (optional)
 - apptainer
 - BMDExpress3
 - R
@@ -99,6 +100,8 @@ Because of GitHub's repository size limitation, you will either have to build th
 Please visit the `README.md` in the `/apptainer_image` folder for more info.
 
 ### Installing environments
+
+#### Option 1 - If you built the apptainer from the original Main R-ODAF Dockerfile
 The apptainer image contains conda which can be used to install environments that are provided in the `/conda_environments` directory. 
 
 Optionally, create a folder to store your conda environments:
@@ -152,6 +155,7 @@ Activate your environments and verify they are installed correctly:
 Apptainer> conda activate mymultiqc
 Apptainer> conda env list #Check that new environment was installed correctly
 ```
+#### Option 2 - If you built the apptainer from the provided Dockerfile or package
 
 ### Configuration and inputs
 
@@ -190,6 +194,21 @@ A sample of what the metadata can look like is shown in the default `/SraRunTabl
   - T/F
 - solvent_control
   - T/F
+
+#### Study directory renaming
+Before running the pipeline, rename the 'Study_id_N_Compound_n_day_exposure' directory. The name of the Study id directory should follow the format:
+```
+"Study_id_N_" + "Compound_" + "n_day_exposure"
+```
+where,
+N = some arbitrary study id number (e.g., 1),
+Compound = the name of the compound, chemical or treatment used in the experiment (e.g., PFOS) and,
+n = the duration of exposure in number of days (e.g., 1).
+
+WARNING: Some of the scripts use this specific naming convention template to parse the directory name for specific paramaters such as the Compound which can be seen on line 104 of `/Study_id_N_Compound_n_day_exposure/Rmd/R-ODAF_2_Sample_QC.rmd': 
+```
+104 chemical_name <- sub("^.*Study_id_\\d+_([^_]+)_\\d+(\\.\\d+)?_day_exposure$", "\\1", projectdir)
+```
 
 #### Reference genome files
 

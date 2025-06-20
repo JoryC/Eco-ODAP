@@ -1,0 +1,3324 @@
+---
+params:
+  projectdir: !expr paste0("/mnt/", Sys.getenv("STUDY_ID_DIR"))
+  project_name: !expr Sys.getenv("STUDY_ID_DIR")
+  species: "zebrafish"                # one of human, mouse, rat, hamster, zebrafish, rainbowtrout, chinesemedaka, fatheadminnow
+  design: "Dose"             # single experimental group of interest; entries in this column must match the contrast names.
+  intgroup: ["Dose"]           # experimental group of interest plus covariates; can be more than one
+  dose: "Dose"
+  nmr_threshold: 1000000 # 10% of 1M reads for TempOSeq = 100,000; 10% of 10M reads for RNA-Seq = 1,000,000.
+  fdr_threshold: 0.05 # false-disocvery rate cutoff for DEGs. Default to  0.01, but should probably relax to 0.05...
+  linear_fc_filter: 1.5 # The linear fold-change filter for DEGs.
+  MinCount: 1 #Should be default 1 for regular RNA-Seq data and 0.5 for something like TempO-Seq or a reduced transcriptome
+  nuisance: !expr NA #"Batch" To remove batch effects for PCA/Heatmaps visualiziations
+  flag: TRUE                  # runs all analysis by default when set to TRUE
+  platform: "RNA-Seq"         # RNA-Seq or TempO-Seq
+  group_facet: !expr NA          # If you have many different experimental groups, you may subset the report by specifying a column in the metadata to filter groups, and then setting the group of interest in group_filter
+  group_filter: !expr NA # Which group will this report be done on?
+  strict_contrasts: TRUE # Use both columns (exp, cont) of contrasts file to limit what is included in the report
+  exclude_samples: !expr NA  # Optionally, a vector of sample names to exclude from the analysis... From the output of SampleQC
+  exclude_groups: !expr NA # Optionally, a vector of groups to exclude from the analysis. By default this is assumed to be in the column specified by params$design.
+  include_only_column:  !expr NA # Restrict analysis to group(s) in the column listed here based on params$include_only_group.
+  include_only_group:  !expr NA # Restrict analysis to this/these group(s) within the column listed in params$include_only_column
+  use_cached_RData: FALSE # If possible, load the saved RData for dds object and gene IDs
+  cpus: !expr as.numeric(Sys.getenv('SLURM_CPUS_PER_TASK')) # Set to a lower number (e.g., 2 to 4) if you aren't working in a server environment
+  run_pathway_analysis: FALSE # Optionally disable pathway analysis if not available for your organism
+  wikipathways_directory: !expr NA
+  biospyder_dbs: !expr NA
+  nBestFeatures: 20 # The number of best features to make plots of their counts
+  nBest: 100 # Number of features to include in table and limiting PCA/clustering analysis
+  nHeatmap: 50 # Number of most variable genes for heatmap
+  nHeatmapDEGs: 50 # Number of DEGs for heatmap
+  sampledata_sep: "\t" # Comma for TempO-Seq, Maybe tabs for RNASeq, customize!
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    code_folding: hide
+    theme: spacelab           # flatly spacelab sandstone cerulean
+    code_download: true
+bibliography: "`r file.path('/mnt', Sys.getenv('STUDY_ID_DIR'), 'Rmd', 'references.bib')`"
+title: "`r paste('Transcriptome analysis:', gsub(pattern = '_', replacement = ' ', x = Sys.getenv('STUDY_ID_DIR')))`"
+author: "Jory Curry"
+---
+
+```{r setup_subtitle, echo = FALSE}
+subtitle <- paste(params$platform, "analysis", 
+                  ifelse(!is.na(params$group_filter), paste("for", paste(params$group_filter, collapse = ' and ')), ''))
+```
+
+# `r subtitle`
+
+***
+
+# Revision History
+
+**This version**  
+  
+*Current version: 1*  
+Date report generated: `r format(Sys.time(), '%d %B, %Y')`  
+Report prepared for: tPOD curation team  
+Purpose of report: Export BMD file and examine preliminary DEGs
+
+* Exercise to analyze RNA-Seq data  
+
+**Previous revisions**  
+
+N/A  
+
+***
+
+# Code setup, Data Loading, and DESeq2 Code
+
+This report is meant to help explore DESeq2 results and was generated using RMarkdown. This section contains the code for setting up the rest of the report.  
+
+## Load libraries
+
+```{r params_define_in_testing, message=F, warnings=F, echo=F, eval=F}
+params <- list()
+params$projectdir="/mnt/Study_id_50_PFBS_4.83_day_exposure"
+params$project_name="Study_id_50_PFBS_4.83_day_exposure"
+params$species="zebrafish"
+params$dose="Dose"
+params$design="Dose"
+params$intgroup=c("Dose")
+params$nmr_threshold=3000000
+params$linear_fc_filter=1.5
+params$fdr_threshold=0.05
+params$MinCount=1
+params$nuisance=NA
+params$flag=TRUE
+params$platform="RNA-Seq"
+params$group_facet=NA
+params$group_filter=NA
+params$strict_contrasts=TRUE
+params$exclude_samples=NA
+params$exclude_groups=NA
+params$include_only_column=NA
+params$include_only_group=NA
+params$use_cached_RData=FALSE
+params$cpus=as.integer(Sys.getenv('SLURM_CPUS_PER_TASK'))
+params$run_pathway_analysis=FALSE
+params$wikipathways_directory=NA
+params$biospyder_dbs=NA
+params$nBestFeatures=20
+params$nBest=100
+params$nHeatmap=50
+params$nHeatmapDEGs=50
+params$sampledata_sep="\t"
+```
+
+```{r docSetup, eval=T}
+## Define paths
+original_dir <- getwd()
+projectdir <- normalizePath(params$projectdir)
+projectdir <- projectdir
+#setwd(projectdir)
+paths <- list()
+# Other important system paths to specify in config
+paths$wikipathways <- params$wikipathways_directory
+# For project structure
+paths$root <- "/mnt"
+paths$data <- projectdir
+paths$raw <- normalizePath(file.path(paths$data, "raw"))
+paths$output <- normalizePath(file.path(paths$data, "output"))
+paths$processed <- normalizePath(file.path(paths$output, "Trimmed_reads", "RSEM")) #This directory should be contain the count table output by R-ODAF_1_sequencing_DataPreprocess...
+paths$metadata <- normalizePath(file.path(paths$root)) #Back to GSE Accession ID parent directory that contains the metadata file, e.g., normalizePath(file.path(paths$root, ".."))
+# Need to update this path... temporary for testing purposes
+paths$reports <- normalizePath(file.path(paths$data, "reports"))
+
+if (is.na(params$group_facet)) {
+  paths$DEG_output <- normalizePath(file.path(paths$data, "DEG_output"))
+  paths$pathway_analysis <- normalizePath(file.path(paths$DEG_output, "pathway_analysis"))
+} else {
+  paths$DEG_output <- normalizePath(file.path(paths$root,
+                             "DEG_output", paste("group_",
+                             params$group_filter, collapse = "_")))
+  paths$pathway_analysis <- normalizePath(file.path(paths$DEG_output, "pathway_analysis"))
+}
+
+paths$RData <- normalizePath(file.path(paths$DEG_output, "RData"))
+
+if (!dir.exists(paths$reports)) {
+    print("Creating Report dir")
+    dir.create(paths$reports)
+} else {
+    print("Report dir exists.")
+}
+
+if (!dir.exists(paths$DEG_output)) {
+    print("Creating DEG_ouput dir")
+    dir.create(paths$DEG_output)
+} else {
+    print("DEG_output dir exists.")
+}
+
+if (!dir.exists(paths$pathway_analysis)) {
+    print("Creating pathway_analysis dir")
+    dir.create(paths$pathway_analysis)
+} else {
+    print("pathway_analysis dir exists.")
+}
+
+if (!dir.exists(paths$RData)) {
+    print("Creating RData dir")
+    dir.create(paths$RData)
+} else {
+    print("RData dir exists.")
+}
+
+## knitrBoostrap and device chunk options
+# Set so that long lines in R will be wrapped:
+knitr::opts_chunk$set(bootstrap.show.code = FALSE,
+                      bootstrap.panel = TRUE,
+                      cache = FALSE)
+knitr::opts_knit$set(root.dir = paths$root)
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+options(browser = "false") # Set browser option to a dummy value because I am in an HPC environment that does not have a browser
+
+# Set this variable to FALSE if you only want to run the plotting functions by reloading the last RData file.
+flag = params$flag # To evaluate analysis chunks
+if (flag == FALSE) { load(paste0(params$projectdir, "Partial_analysis.RData")) }
+# Set this variable to TRUE if you would like to embed the files directly into the HTML for portability. This slows down page responsiveness drastically, since the files are generally quite large.
+embedFiles = FALSE
+# Set this variable to be TRUE if you want to have separate plots of top genes as defined in the R-ODAF template
+R_ODAF_plots = FALSE
+if (params$run_pathway_analysis) {
+  pathway_analysis <- file.path(projectdir, "Rmd/Pathway_analysis.Rmd")
+} else {
+  pathway_analysis <- NULL
+  print("Pathway analysis will be skipped")
+}
+
+```
+
+```{r 'warn_user', eval=!flag}
+message("If this text is visible by default, this report was produced to test plotting functions and should be used exclusively for testing and development.")
+```
+
+```{r setup, warning = FALSE, message = FALSE}
+#### Record start time
+startTime <- Sys.time()
+
+#Make sure you are activating the correct conda environment for DESeq2 stuffs
+#Making your own conda environment with all the necessary packages... beacuse they're not included for some reason... again.
+#DESeq2_report_env.yml
+#name: DESeq2_report_env
+#channels:
+#  - conda-forge
+#  - bioconda
+#  - defaults
+#dependencies:
+#  - r-base
+#  - r-essentials
+#  - r-knitr
+#  - r-kableExtra
+#  - r-tidyverse
+#  - r-tidytext
+# - r-magrittr
+#  - r-ggplot2
+#  - r-openxlsx
+#  - r-data.table
+#  - r-dt
+#  - r-pheatmap
+#  - r-plotly
+#  - r-lattice
+#  - r-rentrez
+#  - r-RColorBrewer
+#  - r-sessionInfo
+#  - r-viridis
+#  - r-dendextend
+#  - bioconductor-deseq2
+#  - bioconductor-limma
+#  - bioconductor-enrichplot
+#  - bioconductor-edger
+#  - bioconductor-biocparallel
+#  - bioconductor-rwikipathways
+#  - bioconductor-rtracklayer
+#  - bioconductor-clusterprofiler
+#  - bioconductor-biomart
+#  - bioconductor-annotationhub
+#  - bioconductor-vsn
+
+#### Load Libraries
+# General purpose
+# library('conflicted')
+library('knitr')
+library('kableExtra')
+library('tidyverse')
+library('magrittr')
+library('ggplot2')
+library('DT')                         
+library('data.table')
+library('pheatmap')
+library('lattice')
+library('tidytext')                   
+library('openxlsx')                   
+library('RColorBrewer')
+library('rentrez')
+library('viridis')
+library('sessioninfo')                
+library('plotly')                     
+library('dendextend')
+#library('RMariaDB')
+
+# Bioinformatics-specific
+library('DESeq2')
+library('limma')
+library('edgeR')
+library('enrichplot')                 
+library('rWikiPathways')
+library('rtracklayer')              
+library('BiocParallel')
+library('clusterProfiler')            
+library('biomaRt')                    
+library('AnnotationHub')              
+library('vsn')                        
+
+# Load genome, depends on species
+# To add: Zebrafish, Folsomia candida, others?
+species <- params$species
+if (species == "human") {
+  # Human:
+  library('org.Hs.eg.db')
+  orgdb <- "org.Hs.eg.db"
+  species_sci <- "Homo sapiens"
+  wiki <- "wikipathways-20210610-gmt-Homo_sapiens.gmt"
+  ensembl_species <- "hsapiens_gene_ensembl"
+  species_gene_symbol <- "external_gene_name"
+  kegg_organism <- "hsa"
+  temposeq_manifest <- "191113_Human_S1500_Surrogate_2.0_Manifest.csv" # options: "191113_Human_S1500_Surrogate_2.0_Manifest.csv" "191004_Human_Whole_Transcriptome_2.0_Manifest.txt"
+} else {
+  if (species == "mouse") {
+    # Mouse:
+	ensembl_species <- "mmusculus_gene_ensembl"
+	species_gene_symbol <- "mgi_symbol"
+	temposeq_manifest <- "100771_mus_musculus_wt_1.1_manifest_revB_2024.csv"
+} else {
+  if (species == "rat") {
+    # Rat: 
+    library('org.Rn.eg.db')
+    orgdb <- "org.Rn.eg.db"
+    species_sci <- "Rattus norvegicus"
+    wiki <- "wikipathways-20210610-gmt-Rattus_norvegicus.gmt"
+    ensembl_species <- "rnorvegicus_gene_ensembl"
+    species_gene_symbol <- "rgd_symbol"
+    kegg_organism <- "rno"
+    temposeq_manifest <- "190809 Rat Whole Transcriptome 1.0 Manifest.xlsx"
+} else {
+  if (species == "hamster") {
+    # Golden hamster:
+    OrgDb.Ma <- query(AnnotationHub(), c("OrgDb", "Mesocricetus auratus"))[[1]]
+    orgdb <- "OrgDb.Ma"
+    species_sci <- "Mesocricetus auratus"
+    ensembl_species <- "mauratus_gene_ensembl"
+    species_gene_symbol <- "external_gene_name"
+} else {
+    if (species == "zebrafish") {
+      # Zebrafish
+      ensembl_species <- "drerio_gene_ensembl"
+      species_gene_symbol <- "external_gene_name"
+} else {
+    if (species == "rainbowtrout") {
+      # Rainbow Trout
+      ensembl_species <- "omykiss_gene_ensembl"
+      species_gene_symbol <- "external_gene_name"
+} else {
+    if (species == "chinesemedaka") {
+      ensembl_species <- "osinensis_gene_ensembl"
+      species_gene_symbol <- "external_gene_name"
+} else {
+    if (species == "fatheadminnow") {
+      print("BioMart not available")
+      print("This script likely needs to be updated before it is able to run")
+      species_gene_symbol <- "external_gene_name"
+} else {
+    message("No species picked!")
+}
+}
+}
+}
+}
+}
+}
+}
+
+# Options
+options(java.parameters = "-Xmx10000m") #This sets java's memory limit to 10,000MB
+theme_set(theme_bw())
+```
+
+The code above (not shown by default) loads the relevant R packages required for analysis.
+
+## Specify parameters
+
+```{r setup_code, warning = FALSE, message = FALSE, collapse = TRUE}
+################################################################################
+################################################################################
+# PARAMETERS - should be set by YAML header.
+################################################################################
+################################################################################
+
+# Various plotting and display options
+nBestFeatures <- params$nBestFeatures
+nBest <- params$nBest
+nHeatmap <- params$nHeatmap
+nHeatmapDEGs <- params$nHeatmapDEGs
+
+# Set analysis ID. This ID will be used as prefix for the output files
+# Normally, as follows: year - project_name - group_filter
+if (is.na(params$group_filter)) {
+  analysisID <- paste(format(Sys.time(), '%Y'), params$project_name, sep = "_")
+} else {
+  analysisID <- paste(format(Sys.time(), '%Y'),
+                      params$project_name,
+                      paste(params$group_filter, collapse = "_"),
+                      sep = "_")
+}
+# Specify used platform/technology for data generation:
+Platform <- params$platform # Should be one of "RNA-Seq" or "TempO-Seq"
+NORM_TYPE <- paste0(analysisID, "_DESeq2_", Platform)
+# Misc parameters
+digits = 2 # For rounding numbers
+
+################################################################################
+################################################################################
+#### FILES TO LOAD
+################################################################################
+################################################################################
+# A. Tab delimited file with merged RSEM.genes.results files:
+if (Platform == "TempO-Seq") {
+  SampleDataFile <- file.path(paths$processed, "count_table.csv")
+  sampledata_sep = params$sampledata_sep
+} else {
+  SampleDataFile <- file.path(paths$processed, "genes.data.tsv")
+  sampledata_sep = params$sampledata_sep
+}
+  
+# B. Tab delimited sample information file with at least 2 columns:
+  # 1. sample names identical to the column names of sampleData
+  # 2. compound/group/whatever (needs to identify to which experimental group the sample belongs)
+SampleKeyFile <- file.path(paths$output, "metadata.QC_applied.txt") #This should point to your filtered metadata file
+# C. Tab delimited file of comparisons (contrasts) to test
+
+DESeqDesign <- read.delim(SampleKeyFile,
+                          stringsAsFactors = FALSE,
+                          sep = "\t",
+                          header = TRUE,
+                          quote = "\"",
+                          row.names = 1) # Pick column that is used in ID; might be more appropriate to change this!
+DESeqDesign$original_names <- rownames(DESeqDesign)
+DESeqDesignAsRead <- DESeqDesign
+
+ContrastsFileDat <- data.frame(
+  int = unique(DESeqDesign[[params$dose]][which(DESeqDesign[[params$dose]] != 0)]),
+  cont = rep(unique(DESeqDesign[[params$dose]][which(DESeqDesign[[params$dose]] == 0)]), times = length(unique(DESeqDesign[[params$dose]][which(DESeqDesign[[params$dose]] != 0)])))
+)
+
+# Write the contrasts data frame (read from the metadata) to a tab-delimited file without headers
+write.table(ContrastsFileDat, file = paste0(paths$output, "/contrasts.txt"), sep = "\t", row.names = FALSE, col.names = FALSE)
+
+# Group of interest in the left column, control for comparison in the right column
+ContrastsFile <- file.path(paths$output, "contrasts.txt")
+
+# Set file locations
+if (!dir.exists(paths$DEG_output)) {dir.create(paths$DEG_output, recursive = TRUE)}
+if (!dir.exists(paths$pathway_analysis)) {dir.create(paths$pathway_analysis, recursive = TRUE)}
+if (!dir.exists(paths$RData)) {dir.create(paths$RData, recursive = TRUE)}
+
+# Specify which groups need to be compared 
+contrasts <- read.delim(ContrastsFile, stringsAsFactors = FALSE, sep = "\t", header = FALSE,  quote = "\"")
+DESIGN <- params$design	# Column name which defines the groups to be compared
+intgroup <- params$intgroup # "Interesting groups" - experimental group/covariates
+
+#Specify AnnotationHub options
+setAnnotationHubOption("ASK", FALSE)
+```
+
+The code above (not shown by default) specifies user preferences and data locations.
+
+## Load data
+
+```{r 'load_data', collapse = TRUE, warning = FALSE, message = FALSE, eval = flag}
+# Load input files
+sampleData <- read.delim(SampleDataFile,
+                         sep = sampledata_sep,
+                         stringsAsFactors = FALSE,
+                         header = TRUE, 
+                         quote = "\"",
+                         row.names = 1,
+                         check.names = FALSE)
+
+# Check if all column names in sampleData end with "_1"
+if (all(grepl("_1$", colnames(sampleData)))) {
+  # Remove the "_1" suffix from all column names
+  colnames(sampleData) <- sub("_1$", "", colnames(sampleData))
+  message("Suffix '_1' has been removed from all column names.")
+} else {
+  message("Not all column names end with '_1'. No changes were made.")
+}
+
+# Parameter-specified exclusions
+# Conditionally exclude contrasts and metadata that should be filtered
+# 1. Filter by group filter - useful for selecting one treatment at a time. params$group_filter
+# 2. Filter manually - useful for removing irrelevant control groups (e.g. reference RNA). params$exclude_groups
+# Note that these should only be run if the respective variables are set.
+if (!is.na(params$group_facet)) {
+  contrasts_to_filter <- DESeqDesign %>%
+  dplyr::filter(!!sym(params$group_facet) %in% params$group_filter) %>% # NOTE: Not sure if %in% or == is better here.
+  pull(params$design) %>% 
+  unique()
+  contrasts <- contrasts %>% dplyr::filter(V1 %in% contrasts_to_filter)
+  if (params$strict_contrasts == T) {
+    contrasts <- contrasts %>% dplyr::filter(V2 %in% contrasts_to_filter)
+  }
+  DESeqDesign <- DESeqDesign %>% dplyr::filter(!!sym(params$design) %in% (unlist(contrasts) %>% unique())) %>% dplyr::filter(!!sym(params$group_facet) %in% params$group_filter)
+}
+if (any(!is.na(params$exclude_samples))) {
+  DESeqDesign <- DESeqDesign %>% dplyr::filter(!original_names %in% params$exclude_samples)
+}
+if (any(!is.na(params$exclude_groups))) {
+  DESeqDesign <- DESeqDesign %>% dplyr::filter(!(!!sym(params$design)) %in% params$exclude_groups)
+  contrasts_to_filter <- DESeqDesign %>% 
+  dplyr::filter(!(!!sym(params$design)) %in% params$exclude_groups) %>%
+  pull(params$design) %>% 
+  unique()
+  contrasts <- contrasts %>% dplyr::filter(V1 %in% contrasts_to_filter)
+  if (params$strict_contrasts == T) {
+    contrasts <- contrasts %>% dplyr::filter(V2 %in% contrasts_to_filter)
+  }
+}
+if (!is.na(params$include_only_column) & !is.na(params$include_only_group)) {
+  DESeqDesign <- DESeqDesign %>%
+    dplyr::filter((!!sym(params$include_only_column)) %in% params$include_only_group)
+  limit_contrasts <- DESeqDesign %>%
+    pull(!!sym(params$design)) %>%
+    unique() %>%
+    as.character()
+  contrasts <- contrasts %>% dplyr::filter(V1 %in% limit_contrasts)
+}
+
+# If there is a dose column, reorder the contrast list by dose
+if (any(grepl(x = colnames(DESeqDesign), pattern = "^dose$", ignore.case = T))) {
+  doseCol <- grep(x = colnames(DESeqDesign), pattern = "^dose$", ignore.case = T, value = FALSE)
+  ordered_by_dose <- DESeqDesign[order(DESeqDesign[[doseCol]]), ] %>%
+    dplyr::select(params$design) %>%
+    dplyr::pull()
+  contrasts <- contrasts %>%
+    dplyr::slice(match(ordered_by_dose, V1)) %>%
+    unique()
+}
+
+# Once contrasts have been filtered, generate short contrast names for report.
+short_contrast_names <- paste(contrasts$V1, "v.", contrasts$V2) # Customize these for your experiment... Must be short enough to fit as Excel tab titles.
+
+# Create directories
+plotdir <- paste(paths$DEG_output, "/plots/", sep = "")
+if (!dir.exists(plotdir)) {dir.create(plotdir, recursive = TRUE)}
+barplot.dir <- paste(plotdir, "barplot_genes/", sep = "")
+if (!dir.exists(barplot.dir)) {dir.create(barplot.dir, recursive = TRUE)}
+
+#Set parameters according to platform
+if (Platform == "RNA-Seq") {
+  threshold = params$nmr_threshold # Number of aligned reads per sample required
+  MinCount <- params$MinCount
+  alpha <- pAdjValue <- params$fdr_threshold # Relaxed from 0.01
+  linear_fc_filter <- params$linear_fc_filter
+  biomart_filter <- "ensembl_gene_id"
+} else if (Platform == "TempO-Seq") {
+  ### WARNING TEMPOSEQ SECITON NOT TESTED. MAY PRODUCE UNEXPECTED RESULTS OR ERRORS! ###
+  threshold = params$nmr_threshold # Number of aligned reads per sample required
+  MinCount <- params$MinCount
+  alpha <- pAdjValue <- params$fdr_threshold
+  linear_fc_filter <- params$linear_fc_filter
+  biomart_filter <- "ensembl_gene_id"
+  print("WARNING: TempoSeq data is not yet fully supported. Expect errors!")
+} else {
+  print("Platform/technology not recognized")
+}
+
+```
+
+The code above (not shown by default) loads user-provided sample meta data (i.e., information about your experiment, also known as colData, or, column data). This also imports the count matrix (i.e., a table of observed counts in which each sample is a column and genes are rows).  
+
+The experimental comparisons of interest to be tested in this report are as follows:  
+
+```{r 'print_contrasts'}
+knitr::kable(contrasts,
+             row.names = F,
+             col.names = c("Group of interest", "Control for comparison"),
+             caption = "Contrasts requested for this analysis.") %>%
+  kable_styling(bootstrap_options = "striped", full_width = F, position = "left") %>%
+  scroll_box(height = "480px")
+```
+
+## Run DESeq2
+
+```{r run-DESeq2, collapse = TRUE, warning = FALSE, message = TRUE, eval = flag}
+##########
+# DESeq2 #
+##########
+print(NORM_TYPE) # Name of experiment
+
+# First data clean-up: replace NA & remove samples with total readcount < threshold
+initialSampleDataCount <- ncol(sampleData)
+sampleData[ is.na(sampleData) ] <- 0 
+sampleData <- sampleData[,(colSums(sampleData) > threshold)] # reads required per sample
+filteredSampleDataCount <- ncol(sampleData)
+# Sometimes extra cleanup may be needed
+# colnames(sampleData) <- gsub(pattern = "^0", replacement = "", x = colnames(sampleData))
+
+samples_before <- nrow(DESeqDesignAsRead)
+
+# Sanity check: each sample (row) in the metadata should have a corresponding column in the count data
+metadata_in_sampledata <- all(rownames(DESeqDesign) %in% colnames(sampleData))
+# Sanity check: each column in the count data should have a corresponding sample (row) in the metadata
+sampledata_in_metadata <- all(colnames(sampleData) %in% rownames(DESeqDesign))
+# Find samples that were removed because they weren't in metadata
+removed <- colnames(sampleData[which(!colnames(sampleData) %in% rownames(DESeqDesign))])
+# Reorder the metadata table to correspond to the order of columns in the count data
+DESeqDesign <- DESeqDesign[DESeqDesign$original_names %in% colnames(sampleData),]
+#DESeqDesign <- na.omit(DESeqDesign) #This line of code breaks everything if the metadata has NAs in it, asy for example from empty columns that are totally irrelevant and 'extra'...
+sampleData <- sampleData[,(rownames(DESeqDesign))]
+samples_after <- nrow(DESeqDesign)
+
+head(rownames(DESeqDesign))
+head(colnames(sampleData)) # Output should match
+
+# Intgroups need to be factors for DESeq2
+DESeqDesign[intgroup] <- lapply(DESeqDesign[intgroup], factor)
+if (!is.na(params$design)) {
+  # If there is a dose column, reorder the experimental group (DESIGN) by dose.
+  if (any(grepl(x = colnames(DESeqDesign),
+                pattern = "^dose$",
+                ignore.case = T))) {
+    doseCol <- grep(x = colnames(DESeqDesign),
+                    pattern = "^dose$",
+                    ignore.case = T)
+    design_factor_reordered <- factor(DESeqDesign[[params$design]],
+                                      levels = unique(DESeqDesign[[params$design]][order(DESeqDesign[[doseCol]])]),
+                                      ordered = FALSE)
+    DESeqDesign[[params$design]] <- design_factor_reordered
+  } else {
+    DESeqDesign[params$design] <- factor(DESeqDesign[, params$design])
+  }
+}
+
+if (file.exists(file.path(paths$RData, "dds.RData")) & is.na(params$group_facet) & params$use_cached_RData == TRUE) {
+  print(paste("Already found DESeq2 object from previous run; loading from disk."))
+  load(file.path(paths$RData, "dds.RData"))
+  if (!identical(as.data.frame(round(counts(dds))),
+                 round(sampleData), 0)) {
+    print("Not identical")
+    }
+  } else {
+    if (file.exists(file.path(paths$RData,
+                             paste0("dds_",
+                                    paste(params$group_filter, collapse = "_"),
+                                    ".RData"))) & 
+       !is.na(params$group_facet) & 
+       params$use_cached_RData == TRUE) {
+      load(file = file.path(paths$RData,
+                          paste0("dds_",
+                                 paste(params$group_filter, collapse = "_"),
+                                 ".RData")))
+      } else {
+      current_design <- formula(paste0(paste0("~"),
+                                       paste0(intgroup, collapse = " + ")))
+      dds <- DESeqDataSetFromMatrix(countData = round(sampleData),
+                                    colData   = as.data.frame(DESeqDesign),
+                                    design    = current_design)
+      dds <- dds[, rownames(DESeqDesign)]
+      dds <- dds[rowSums(counts(dds)) > 1]
+      bpparam <- MulticoreParam(params$cpus)
+      if (any(table(as.matrix(DESeqDesign[ ,DESIGN])) <= 1)) {
+        # Only one replicate per condition, so we skip DESeq fitting
+        message("Only one replicate per condition; skipping model fitting.")
+        dds <- estimateSizeFactors(dds)
+        model_fitted <- FALSE
+      } else {
+        dds <- DESeq(dds, parallel = TRUE, BPPARAM = bpparam)
+        model_fitted <- TRUE
+      }
+      if (is.na(params$group_facet)) {
+        save(dds,
+             file = file.path(paths$RData, "dds.RData"))
+      } else {
+        save(dds,
+             file = file.path(paths$RData,
+                            paste0("dds_",
+                                   paste(params$group_filter, collapse = "_"),
+                                   ".RData")))
+      }
+    }
+}
+
+# ### REMOVE if done above from scratch
+# keep <- grep(colData(dds)$chemical, pattern = "cells", invert = T, ignore.case = T)
+# dds <- dds[, keep]
+# dds <- dds[row.names(dds) %in% biospyder$ENSEMBL_GENE_ID,]
+
+# Another sanity check to make sure the object looks correct
+#resultsNames(dds) #This will cause the code to fail because it assumes model fitting has taken place
+head(colData(dds))
+head(assay(dds))
+head(rowRanges(dds))
+str(counts(dds))
+
+# Make regularized log object for later plotting
+# rld <- tryCatch(rlog(dds), error = function(e) { rlog(dds, fitType = 'mean') })
+# Use vst for hundreds of samples!
+
+if (!is.na(params$nuisance)) {
+  if (any(table(colData(dds)[[params$design]]) == 1)) {
+    rld <- rlog(dds, blind = F)  # Use rlog() instead of vst() when there's only one replicate
+  } else {
+    rld <- vst(dds, blind = F)  # Continue using vst() when there are replicates
+  }
+  mat <- assay(rld)
+  condition <- formula(paste0(paste0("~"),
+                              paste0(intgroup[!intgroup %in% params$nuisance],
+                                     collapse = " + ")))
+  mm <- model.matrix(condition, colData(rld))
+  mat <- limma::removeBatchEffect(mat, batch = rld[[params$nuisance]], design = mm)
+  assay(rld) <- mat
+} else {
+  if (all(table(colData(dds)[[params$design]]) == 1)) {
+    rlogTransformPossible <- FALSE
+    rld <- dds
+    print("WARNING: You only have one replicate per dose for each dose... it is impossible to calculate dispersion gene estimates for DESeq, meaning the DESEq2 DEG analysis cannot be conducted...")
+  } else {
+    rlogTransformPossible <- TRUE
+    rld <- vst(dds, blind = F)  # Use vst() if there are replicates
+  }
+}
+
+# rld <- rlog(dds, blind = F)
+```
+
+The code above (not shown by default) uses DESeq2 `r packageVersion("DESeq2")` to test for deferentially abundant genes within the `r Platform` data.  
+
+# Quality control
+
+A study-wide quality control script removes samples that cluster at a distance greater than a specified cutoff, samples that are noisy, and samples that do not have sufficient aligned reads. **More details are available in a separate report.**  
+
+Within this report, gene/probe-level quality control is performed below ("Run pairwise comparisons" section).
+
+Prior to running DESeq2, the data was filtered to remove samples that do not have $`r threshold`$ reads per sample.  
+
+The metadata used for this report included `r samples_before` samples.  
+
+The count matrix initially included `r initialSampleDataCount` samples (including any reference material samples). After removing samples with less than $`r threshold`$ reads, `r filteredSampleDataCount` samples were left. It is `r metadata_in_sampledata` that all the samples provided in the metadata table were also identified in the count matrix. It is `r sampledata_in_metadata` that all the samples in the count matrix were also identified in the metadata table.  
+
+There were `r samples_after` samples passing all thresholds. **The samples excluded from analysis are shown in the table in the section titled "Sample data", below, along with complete sample metadata for the experiment.**    
+
+## Sample data (metadata about your experiment) {.tabset .tabset-fade}
+
+**Some samples may already have been removed in study-wide QC.**
+
+### Samples used in this report
+
+This table shows the final list of samples that were used in the data analysis (as well as the corresponding sample information, e.g., to which experimental group samples belong).  
+
+```{r print_metadata_used}
+# Conditionally sort by dose if that column name is present
+if (any(grepl(x = colnames(DESeqDesign), pattern = "^dose$", ignore.case = T))) {
+  doseCol <- grep(x = colnames(DESeqDesign), pattern = "^dose$", ignore.case = T)
+  knitr::kable(DESeqDesign %>%
+                 group_by(!!sym(params$design)) %>%
+                 arrange(!!sym(colnames(DESeqDesign)[doseCol])),
+             row.names =  F,
+             caption = "Samples and corresponding experimental conditions used in this report") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive")) %>%
+  scroll_box(width = "100%", height = "480px")
+} else {
+  knitr::kable(DESeqDesign %>% arrange(!!sym(params$design)),
+             row.names =  F,
+             caption = "Samples and corresponding experimental conditions used in this report") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive")) %>%
+  scroll_box(width = "100%", height = "480px")
+}
+
+knitr::kable(DESeqDesign %>% group_by(!!sym(params$design)) %>% tally(),
+             row.names = F,
+             col.names = c("Experimental group", "Number of samples in group"),
+             caption = "Number of samples in each experimental group used in this report") %>%
+  kable_styling(bootstrap_options = "striped", full_width = F, position = "left") %>%
+  scroll_box(width = "100%", height = "480px")
+```
+
+### Samples removed from this report
+
+This table shows the samples that were removed from this analysis.
+
+```{r print_metadata_removed}
+# Conditionally sort by dose if that column name is present?
+knitr::kable(DESeqDesignAsRead %>% arrange(!!sym(params$design)) %>% dplyr::filter(!original_names %in% DESeqDesign$original_names),
+             row.names =  F,
+             caption = "Samples removed from analysis") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive")) %>%
+  scroll_box(width = "100%", height = "480px")
+
+knitr::kable(DESeqDesignAsRead %>%
+               dplyr::filter(original_names %in% removed) %>%
+               group_by(!!sym(params$design)) %>% tally(),
+             row.names = F,
+             col.names = c("Experimental group", "Number of samples removed"),
+             caption = "Number of samples removed from each experimental group") %>%
+  kable_styling(bootstrap_options = "striped", full_width = F, position = "left") %>%
+  scroll_box(width = "100%", height = "480px")
+```
+
+### Original sample metadata as provided
+
+This table shows the original sample metadata including any samples that were removed within this report.  **Note that some samples may already have been removed in study-wide QC before loading this metadata.**
+
+```{r print_metadata_provided}
+# Conditionally sort by dose if that column name is present?
+knitr::kable(DESeqDesignAsRead %>% arrange(!!sym(params$design)),
+             row.names =  F,
+             caption = "Complete sample metadata as provided to the Genomics Laboratory.") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive")) %>%
+  scroll_box(width = "100%", height = "480px")
+
+knitr::kable(DESeqDesignAsRead %>% group_by(!!sym(params$design)) %>% tally(),
+             row.names = F,
+             col.names = c("Experimental group", "Number of samples as provided"),
+             caption = "Number of samples and experimental groups as provided") %>%
+  kable_styling(bootstrap_options = "striped", full_width = F, position = "left") %>%
+  scroll_box(width = "100%", height = "480px")
+```
+
+## Read count plots
+
+This section shows the number of reads obtained for sample groups included in the report.  
+
+```{r read-counts, warning = FALSE}
+reads_df = data.frame(reads = round(colSums(sampleData), 3))
+reads_df$original_names <- row.names(reads_df)
+
+reads_df_annotated <- dplyr::left_join(DESeqDesign, reads_df)
+
+rc_plot <- ggplot(reads_df_annotated,
+       aes(x = !!sym(params$design),
+           y = reads)) +
+  geom_boxplot() +
+  geom_jitter(size = 0.3, alpha = 0.5, color = "blue") +
+  coord_flip() +
+  expand_limits(y = 0) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_y_continuous(labels = function(x) format(x, scientific = TRUE))
+
+output_file_path <- normalizePath(paste0(paths$output, "/Read_count_plot.pdf"))
+
+# Print the current working directory
+print(paste0("Current working directory: ", getwd()))
+
+# Print the output path
+print(paste0("Saving plot to: ", output_file_path))
+
+ggsave(rc_plot, file = output_file_path)
+
+# Check if the file exists
+if (file.exists(output_file_path)) {
+  print("File saved successfully.")
+} else {
+  print("Error: File not found.")
+}
+```
+
+```{r read-counts_image, fig.width=10, fig.height=8, out.width='100%', out.height='100%'}
+# Include the plot
+#include_path <- normalizePath(output_file_path)
+#print(paste0("Including plot from: ", include_path))
+#knitr::include_graphics(path = include_path, error = FALSE, rel_path = FALSE, out.width='100%', out.height='100%')
+rc_plot
+```
+
+# Testing for differentially expressed genes
+
+## Load R-ODAF functions
+
+```{r 'define-ODAF-functions', collapse = TRUE, warning = FALSE, message = FALSE}
+###################################################################################
+#DEFINE FUNCTIONS
+###################################################################################
+plot.barplots <- function(samples, b) {
+  color <- NULL
+  for (h in 1:ncol(norm_data)) {
+    if (substring(colnames(norm_data)[h], 1, 3) == substring(condition2, 1, 3)) { color <- c(color, "red3") } else {color <- c(color, "darkgrey")}
+  }
+  fileNamePlot <- paste0(params$output, "/", b, row.names(samples)[b], ".png")
+  pseudoTitle <- paste0(row.names(samples)[b], "_pAdj:", samples[b, "padj"])
+  
+  png(file = paste(fileNamePlot, sep = "/"), width = 1200, height = 700, pointsize = 20)
+  par(mar = c(8, 4, 3, 1))
+  barplot(as.numeric(norm_data[row.names(samples)[b],]), las = 2, col = color, main = pseudoTitle, cex.names = 0.5,  cex.axis = 0.8, names.arg = colnames(norm_data)) 
+  dev.off()
+} #plot.barplots function done
+
+###################################################################################
+draw.barplots <- function(samples, top_bottom, NUM){
+  if (nrow(samples) == 0) {
+    #print("no genes to plot") 
+  } else { 
+    if (top_bottom == "top") {
+      #print(paste0("drawing Top ", NUM, " plots"))
+      if (nrow(samples) <= NUM) { 
+        for (b in 1:nrow(samples)) {plot.barplots(samples, b)}
+      }
+      
+      if (nrow(samples) > NUM) { 
+        for (b in 1:NUM) {plot.barplots(samples, b)}	
+      }	
+    }
+    
+    if (top_bottom == "bottom") {
+      #print(paste0("drawing Bottom", NUM, " plots"))
+      if (nrow(samples) <= NUM) { 
+        for (b in 1:nrow(samples)) {plot.barplots(samples, b)}
+      }
+      if (nrow(samples) > NUM) { 
+        for (b in ((nrow(samples) - NUM + 1):nrow(samples))) {plot.barplots(DEsamples, b)}
+      }
+    }}
+} #draw.barplots function done
+
+###################################################################################
+###################################################################################
+```
+
+The code above (not shown by default) loads in plotting functions specific to the Omics Data Analysis Frameworks for Regulatory application (R-ODAF) template. More information on the R-ODAF framework is available [here](https://github.com/MCTverheijen/R-ODAF).
+
+## Run pairwise comparisons
+
+```{r 'run_ODAF_code', collapse = TRUE, warning = FALSE, message = FALSE, eval = flag}
+
+# Initial setup for DESeq2 contrasts
+cooks   <- F # Sometimes may need consideration
+resList <- list()
+resListAll <- list()
+Counts  <- counts(dds, normalized = TRUE)
+CPMdds  <- cpm(counts(dds, normalized = TRUE))
+res_list <- NULL
+FileName_list <- NULL
+DESamples_list <- NULL
+DECounts_list <- NULL
+Filter_DEG_list <- NULL
+
+for (x in 1:nrow(contrasts)) {	## for all comparisons to be done	
+	
+  condition1 <- contrasts[x, 2]
+	condition2 <- contrasts[x, 1]
+	print(paste(condition2, " vs ", condition1, ":", NORM_TYPE))
+	
+	DE_Design <- matrix(data = NA, ncol = 2)
+	DE_Design <- as.matrix(DESeqDesign[DESeqDesign[, DESIGN] %in% c(condition1,
+	                                                               condition2),])
+
+  # Note: Make sure to check that everything aligns correctly
+  if (!all(colnames(samples) == rownames(DE_Design))) {
+    stop("Mismatch between samples columns and DE_Design rows.")
+  } else {
+    print("Check: All colnames of the DE_Design and the sample matrix match!")
+  }
+  # Print all unique values in the DESIGN column for clarity
+  message("Unique values in the DESIGN column:")
+  print(unique(DE_Design[, DESIGN]))
+
+  # Check for mismatches in row names
+  missing_samples <- !rownames(DE_Design) %in% colnames(sampleData)
+  if (any(missing_samples)) {
+    print(
+      "Mismatch detected: These row names from DE_Design don't match any columns in sampleData:"
+    )
+    message(
+      "Mismatch detected: These row names from DE_Design don't match any columns in sampleData:"
+    )
+    print(rownames(DE_Design)[missing_samples])
+  } else {
+    # Extract samples if all row names are valid
+    samples <- sampleData[, rownames(DE_Design)]
+    message("Extracted Samples based on DE_Design row names:")
+    print(samples, max = 100) #This number is arbitrary I just don't want to flood the terminal with this output
+  }
+
+	colnames(samples) <- NULL
+
+
+	
+	###########
+
+
+
+
+ ##################################################################################################
+
+  # Count replicates per dose group
+	SampPerGroup <- table(DE_Design[, DESIGN])
+  
+  ### Setting condition for if the experiment had only 1 sample in any one DESEQ Design condition.
+  #################################
+  ### 1 Sample in any one group ###
+  ################################# 
+  if (any(SampPerGroup == 1)) {
+  message(
+    "Only normalizing the data and applying the 'Relevance' filter to the expression data because there is at least one dose group with only 1 sample replicate and that compromises the DESeq Differential Expression analysis. Please consider excluding this dose group if you wish to continue with DESeq."
+  )
+  #Normalize the counts data and save the outputs so we can use it for BMDExpress downstream
+  message("Wait... (estimating size factors form normalization)")
+  #dds <- estimateSizeFactors(dds)
+  message(
+    paste0(
+      "Done estimating Size Factors... Now filtering genes: 75% of at least 1 group need to be above ",
+      MinCount,
+      " CPM... This filter excludes all genes that do not have at least 75% of their replicates expressed at 1 CPM in any one of the experimental conditions"
+    )
+  )
+  #Filter low readcounts (genes not meeting the condition : at least one condition with 75% of the samples above 1 CPM)
+  Counts <- counts(dds, normalized = TRUE)
+  CPMdds <- cpm(counts(dds, normalized = TRUE))
+  
+  Filter <- matrix(data = NA,
+                   ncol = 3,
+                   nrow = nrow(Counts))
+  rownames(Filter) <- rownames(Counts)
+  colnames(Filter) <- c("Low", "quantile", "spike")
+  
+  # Apply the "Relevance" condition
+  
+  for (gene in 1:nrow(dds)) {
+    CountsPass <- NULL
+    for (group in 1:length(SampPerGroup)) {
+      #sampleCols<-grep(dimnames(SampPerGroup)[[1]][group],DE_Design[,DESIGN]) #Changed: R-ODAF default grep is not specific enough!!!
+      sampleCols <-
+        grep(paste0("^", dimnames(SampPerGroup)[[1]][group], "$"), DE_Design[, DESIGN])
+      Check <-
+        sum(CPMdds[gene, sampleCols] >= MinCount) >= 0.75 * SampPerGroup[group]
+      CountsPass <- c(CountsPass, Check)
+    }
+    
+    if (sum(CountsPass) > 0) {
+      Filter[gene, 1] <- 1
+    }   else {
+      Filter[gene, 1] <- 0
+    }
+    
+  }
+  
+  compte <- Counts[Filter[, 1] == 1,]
+  Filter <- Filter[rownames(Filter) %in% rownames(compte),]
+  
+  print(
+    paste(
+      "Relevance filtering removed ",
+      nrow(dds) - nrow(Filter),
+      " genes from the ",
+      nrow(dds),
+      " assessed. ",
+      nrow(Filter),
+      " genes remaining",
+      sep = ""
+    )
+  )
+  message(
+    paste(
+      "Relevance filtering removed ",
+      nrow(dds) - nrow(Filter),
+      " genes from the ",
+      nrow(dds),
+      " assessed. ",
+      nrow(Filter),
+      " genes remaining",
+      sep = ""
+    )
+  )
+  norm_data <-
+    counts(dds[rownames(compte)], normalized = TRUE) #Normalized counts data filtered for only relevant genes!!
+  relevance_filtered_data <- norm_data  # Save the relevance-filtered data for later use
+  
+  # save the normalized counts and the list of DEGs
+
+  # Make new directory for the ODAF-specific files
+	ODAFdir <- file.path(paths$DEG_output, "R-ODAF")
+	if (!dir.exists(ODAFdir)) {dir.create(ODAFdir, recursive = TRUE)}
+
+  if (sum(SampPerGroup) > 2) {
+  
+  print("At least one condition had more than 1 replicate per dose... dispersion estimates can be calculated and DESeq2 can be run... However, please use EXTREME caution when interpreting the reults...")
+  print("Obtaining the DESeq2 results")
+  message("Obtaining the DESeq2 results")
+  
+  # compute the DEGs on the genes passing the Relevance condition
+
+  currentContrast <- c(DESIGN, condition2, condition1)
+  bpparam <- MulticoreParam(params$cpus)
+	res <- DESeq2::results(DESeq(dds[rownames(compte),], parallel = TRUE, BPPARAM = bpparam),
+	               parallel = TRUE,
+	               BPPARAM = bpparam,
+	               contrast = currentContrast,
+	               pAdjustMethod = 'fdr',
+                 alpha = params$fdr_threshold,
+	               cooksCutoff = cooks,
+                 independentFiltering = F) # If Cooks cutoff disabled - manually inspect.
+	res <- lfcShrink(dds = DESeq(dds[rownames(compte),], parallel = TRUE, BPPARAM = bpparam),
+	                 contrast = currentContrast,
+	                 res = res,
+	                 type = "ashr")
+  res_list[[paste0(NORM_TYPE, "_", condition2, "_vs_", condition1)]] <- res
+
+  FileName <- paste(NORM_TYPE, condition2, "vs", condition1, "FDR", pAdjValue, sep = "_")
+  FileName_list[[paste0(NORM_TYPE, "_", condition2, "_vs_", condition1)]] <- FileName
+
+  DESamples <- subset(res, res$padj < pAdjValue)
+  DESamples_list[[paste0(NORM_TYPE, "_", condition2, "_vs_", condition1)]] <- DESamples
+
+  DECounts <- compte[rownames(compte) %in% rownames(DESamples), , drop = FALSE] #The original R-ODAF code had a bug where the rowname is dropped if only one row is returned. Fixing that bug with one simple argument 'drop = FALSE' here...
+  DECounts_list[[paste0(NORM_TYPE, "_", condition2, "_vs_", condition1)]] <- DECounts
+
+  Filter <- Filter[rownames(Filter) %in% rownames(DECounts), , drop = F]
+  Filter_DEG_list[[paste0(NORM_TYPE, "_", condition2, "_vs_", condition1)]] <- Filter
+  
+	resListAll <- res_list
+	resList[[x]] <- DESamples
+
+  } else {
+
+      message("DESEq2 results cannot be obtained because there is only 1 sample per condition for both conditions")
+      currentContrast <- c(DESIGN, condition2, condition1)
+      bpparam <- MulticoreParam(params$cpus)
+
+      # Create an empty DESeqResults object
+      res <- DESeqResults(DataFrame(
+        baseMean = numeric(0),
+        log2FoldChange = numeric(0),
+        lfcSE = numeric(0),
+        pvalue = numeric(0),
+        padj = numeric(0)
+      ))
+      # Add metadata columns
+      mcols(res) <- DataFrame(type = c("intermediate", "results", "results", "results", "results"), description = c(paste0("mean of normalized counts for all samples"), paste0("log2 fold change (MMSE): Dose ", condition2, " vs ", condition1), paste0("posterior SD: Dose ", condition2, " vs ", condition1), paste0("Wald test p-value: Dose ", condition2, " vs ", condition1), paste0("fdr adjusted p-values")))
+      res_list[[paste0(NORM_TYPE, "_", condition2, "_vs_", condition1)]] <- res
+
+      FileName <- paste(NORM_TYPE, condition2, "vs", condition1, "FDR", pAdjValue, sep = "_")
+      FileName_list[[paste0(NORM_TYPE, "_", condition2, "_vs_", condition1)]] <- FileName
+
+      DESamples <- res
+      DESamples_list[[paste0(NORM_TYPE, "_", condition2, "_vs_", condition1)]] <- DESamples
+
+      DECounts <- DECounts <- compte[rownames(compte) %in% rownames(DESamples), , drop = FALSE] #The original R-ODAF code had a bug where the rowname is dropped if only one row is returned. Fixing that bug with one simple argument 'drop = FALSE' here...
+      DECounts_list[[paste0(NORM_TYPE, "_", condition2, "_vs_", condition1)]] <- DECounts
+
+      Filter <- Filter[rownames(Filter) %in% rownames(DECounts), , drop = F]
+      Filter_DEG_list[[paste0(NORM_TYPE, "_", condition2, "_vs_", condition1)]] <- Filter
+
+	    resListAll <- res_list
+	    resList[[x]] <- DESamples
+
+  }
+
+  write.table(
+    norm_data,
+    file = paste0(
+      ODAFdir,
+      "/",
+      FileName,
+      "_Normalized_and_Relevance_Filtered_Data.txt"
+    ),
+    sep = "\t",
+    quote = FALSE
+  )
+  write.table(
+    Counts,
+    file = paste0(ODAFdir,
+                  "/",
+                  FileName,
+                  "_Normalized_Only_Data.txt"),
+    sep = "\t",
+    quote = FALSE
+  )
+  write.table(DESamples,
+	            file = paste0(ODAFdir, "/", FileName, "_DEG_table.txt"),
+	            sep = "\t",
+	            quote = FALSE)
+  message(
+    paste0(
+      "DESeq2 is Done.
+  Your normalized and relevance filtered data can be found in the ... ",
+      ODAFdir,
+      "/",
+      FileName,
+      "_Normalized_and_Relevance_Filtered_Data.txt",
+      "... file location.",
+      "
+       Your normalized only data can be found in the ...",
+      ODAFdir,
+      "/",
+      FileName,
+      "_Normalized_Only_Data.txt",
+      "... file location.",
+      "
+      Your DE samples can be found in the ... ",
+      ODAFdir,
+      "/",
+      FileName,
+      "_DEG_table.txt",
+      "... file location. ",
+      " 
+       WARNING: The spike filter and third quantile filter were skipped for this contrast because there was only 1 sample in at least one of the contrast groups."
+    )
+  )
+
+  # This section skipped the quantile and spike filters #
+
+  } else {
+  ################################################
+  ### Not 1 Sample in any one group (standard) ###
+  ################################################
+  message(
+    "Proceeding with the standard R-ODAF DESeq2 analysis which includes relevance filtering, differential gene expression, and quantile and spike filtering of DEGs..."
+  )
+  message(
+    "Wait... (executing DESeq() wrapper function which does estimation of size factors, disperion, and GLM NegativeBinomial modelling)"
+  )
+  
+  message(
+    paste0(
+      "Filtering genes: 75% of at least 1 group need to be above ",
+      MinCount,
+      " CPM... This filter excludes all genes that do not have at least 75% of their replicates expressed at 1 CPM in any one of the experimental conditions"
+    )
+  )
+  #Filter low readcounts (genes not meeting the condition : at least one condition with 75% of the samples above 1 CPM)
+  Counts <- counts(dds, normalized = TRUE)
+  CPMdds <- cpm(counts(dds, normalized = TRUE))
+  
+  Filter <- matrix(data = NA,
+                   ncol = 3,
+                   nrow = nrow(Counts))
+  rownames(Filter) <- rownames(Counts)
+  colnames(Filter) <- c("Low", "quantile", "spike")
+  
+  # Apply the "Relevance" condition
+  for (gene in 1:nrow(dds)) {
+    CountsPass <- NULL
+    for (group in 1:length(SampPerGroup)) {
+      #sampleCols<-grep(dimnames(SampPerGroup)[[1]][group],DE_Design[,DESIGN]) #R-ODAF default grep is not specific enough!!!
+      sampleCols <-
+        grep(paste0("^", dimnames(SampPerGroup)[[1]][group], "$"), DE_Design[, DESIGN])
+      Check <-
+        sum(CPMdds[gene, sampleCols] >= MinCount) >= 0.75 * SampPerGroup[group]
+      CountsPass <- c(CountsPass, Check)
+    }
+    
+    if (sum(CountsPass) > 0) {
+      Filter[gene, 1] <- 1
+    }   else {
+      Filter[gene, 1] <- 0
+    }
+    
+  }
+
+  compte <- Counts[Filter[, 1] == 1, ]
+  Filter <- Filter[rownames(Filter) %in% rownames(compte), ]
+    
+  print(
+    paste(
+      "Relevance filtering removed ",
+      nrow(dds) - nrow(Filter),
+      " genes from the ",
+      nrow(dds),
+      " assessed. ",
+      nrow(Filter),
+      " genes remaining",
+      sep = ""
+    )
+  )
+  message(
+    paste(
+      "Relevance filtering removed ",
+      nrow(dds) - nrow(Filter),
+      " genes from the ",
+      nrow(dds),
+      " assessed. ",
+      nrow(Filter),
+      " genes remaining",
+      sep = ""
+    )
+  )
+  
+  print("Obtaining the DESeq2 results")
+  message("Obtaining the DESeq2 results")
+  
+  # compute the DEGs on the genes passing the Relevance condition
+
+  if (any(table(as.matrix(DESeqDesign[ ,DESIGN])) <= 1) && table(as.matrix(DESeqDesign[ ,DESIGN]))[as.character(condition2)] >= 1) {
+    dds <- DESeq(dds, parallel = TRUE, BPPARAM = bpparam)
+  }
+
+  currentContrast <- c(DESIGN, condition2, condition1)
+  bpparam <- MulticoreParam(params$cpus)
+	res <- DESeq2::results(dds[rownames(compte),],
+	               parallel = TRUE,
+	               BPPARAM = bpparam,
+	               contrast = currentContrast,
+	               pAdjustMethod = 'fdr',
+                 alpha = params$fdr_threshold,
+	               cooksCutoff = cooks,
+                 independentFiltering = F) # If Cooks cutoff disabled - manually inspect.
+	res <- lfcShrink(dds = dds[rownames(compte),],
+	                 contrast = currentContrast,
+	                 res = res,
+	                 type = "ashr")
+  res_list[[paste0(NORM_TYPE, "_", condition2, "_vs_", condition1)]] <- res
+
+  FileName <- paste(NORM_TYPE, condition2, "vs", condition1, "FDR", pAdjValue, sep = "_")
+  FileName_list[[paste0(NORM_TYPE, "_", condition2, "_vs_", condition1)]] <- FileName
+
+  DESamples <- subset(res, res$padj < pAdjValue) # It's possible for this value to be zero!
+  DESamples_list[[paste0(NORM_TYPE, "_", condition2, "_vs_", condition1)]] <- DESamples
+
+  DECounts <- compte[rownames(compte) %in% rownames(DESamples), , drop = FALSE] #The original R-ODAF code had a bug where the rowname is dropped if only one row is returned. Fixing that bug with one simple argument 'drop = FALSE' here... and yes it looks funny to have ", , drop = FALSE", but it is intentional and it works to keep the headers
+  DECounts_list[[paste0(NORM_TYPE, "_", condition2, "_vs_", condition1)]] <- DECounts
+
+  Filter <- Filter[rownames(Filter) %in% rownames(DECounts), , drop = F]
+  Filter_DEG_list[[paste0(NORM_TYPE, "_", condition2, "_vs_", condition1)]] <- Filter
+
+  # Make new directory for the ODAF-specific files
+	ODAFdir <- file.path(paths$DEG_output, "R-ODAF")
+	if (!dir.exists(ODAFdir)) {dir.create(ODAFdir, recursive = TRUE)}
+	
+  norm_data <- counts(dds[rownames(compte)], normalized = TRUE)
+  relevance_filtered_data <- norm_data  # Save the relevance-filtered data for later use
+
+  print("Check median against third quantile" )
+	print("AND")
+	print("Check the presence of a spike" )
+
+  #Note about Spike filter: The spike filter could likely be too scrict for any dataset with 3 or less replicates. The authors of the R-ODAf recommend 4 replicates for this spike filter. If your dataset has only 1 replicate per conditon, for example, this step is skipped.
+
+  if (nrow(DESamples) == 0) {
+    print("No DEGs are present to filter.")
+  } else {
+  for (gene in 1:nrow(DECounts)) {
+	  # Check the median against third quantile
+		quantilePass <- NULL
+		sampleColsg1 <- grep(paste0("^", dimnames(SampPerGroup)[[1]][1], "$"),DE_Design[,DESIGN])
+		sampleColsg2 <- grep(paste0("^", dimnames(SampPerGroup)[[1]][2], "$"),DE_Design[,DESIGN])
+		
+		Check <- median(as.numeric(DECounts[gene, sampleColsg2])) > quantile(DECounts[gene, sampleColsg1], 0.75)[[1]]
+		quantilePass <- c(quantilePass, Check)
+			
+		if (sum(quantilePass) > 0) {
+		  Filter[gene, 2] <- 1 # Quantile check good
+		}	else {
+		  Filter[gene, 2] <- 0 # Quantile check fail
+		}
+
+		# Check for spikes 
+		spikePass <- NULL
+		for (group in 1:length(SampPerGroup)) {
+				sampleCols <- grep(paste0("^", dimnames(SampPerGroup)[[1]][group], "$"), DE_Design[ ,DESIGN])
+			if (length(sampleCols) <= 2 || max(DECounts[gene,sampleCols]) == 0) {
+				Check <- FALSE  # Skip filtering by setting Check to FALSE
+				} else {
+				Check <- (max(DECounts[gene, sampleCols]) / sum(DECounts[gene, sampleCols])) >= 1.4 * (SampPerGroup[group])^(-0.66)
+			}
+      spikePass <- c(spikePass, Check)
+		}
+		if (sum(spikePass) > 1) {
+		  Filter[gene, 3] <- 0 # Spike detected
+		}	else {
+		  Filter[gene, 3] <- 1 # No spike detected
+		}
+	}
+  }
+  
+
+    # extract the final list of DEGs
+  
+  if (nrow(DESamples) == 0) {
+    DECounts_relevance_quantile_and_spike_filtered <- DESamples
+    DECounts_no_quant <- DESamples
+    DECounts_spike <- DESamples
+  } else {
+    DECounts_relevance_quantile_and_spike_filtered <- DESamples[rowSums(Filter) == 3 , ]
+    DECounts_no_quant <- DESamples[Filter[, 2] == 0 , ]
+    DECounts_spike <- DESamples[Filter[, 3] == 0 , ]
+  }
+
+    message(
+    paste(
+      "A total of ",
+      nrow(DECounts_relevance_quantile_and_spike_filtered),
+      " DEGs were selected, after ",
+      nrow(DECounts_no_quant),
+      " genes(s) removed by the quantile rule and ",
+      nrow(DECounts_spike),
+      " gene(s) with a spike",
+      sep = ""
+    )
+  )
+  print(paste0("A total of ", nrow(DECounts_relevance_quantile_and_spike_filtered),
+              " DEGs were selected, after ", nrow(DECounts_no_quant),
+              " genes(s) removed by the quantile rule and ", nrow(DECounts_spike),
+              " gene(s) with a spike"))
+
+  # Save the normalized counts and the list of DEGs
+  write.table(Counts,
+	            file = paste0(ODAFdir, "/", FileName, "_Norm_Data.txt"),
+	            sep = "\t",
+	            quote = FALSE)
+	write.table(norm_data,
+	            file = paste0(ODAFdir, "/", FileName, "_Norm_and_Relevant_Data.txt"),
+	            sep = "\t",
+	            quote = FALSE)
+	write.table(DESamples,
+	            file = paste0(ODAFdir, "/", FileName, "_DEG_table.txt"),
+	            sep = "\t",
+	            quote = FALSE)
+	write.table(DECounts_no_quant,
+	            file = paste0(ODAFdir, "/", FileName, "_failed_quantile_table.txt"),
+	            sep = "\t",
+	            quote = FALSE)
+	write.table(DECounts_spike,
+	            file = paste0(ODAFdir, "/", FileName, "_failed_DEspikes_table.txt"),
+	            sep = "\t",
+	            quote = FALSE)
+  write.table(DECounts_relevance_quantile_and_spike_filtered,
+	            file = paste0(ODAFdir, "/", FileName, "_Norm_Relevant_Quantile_and_Spike_Filtered_Data.txt"),
+	            sep = "\t",
+	            quote = FALSE)
+  
+  print("DESeq2 Done")
+
+  message(paste0(
+      "DESeq2 is Done.
+  Your normalized, relevance filtered, spike filtered, and quantile filtered GE data can be found in the ... ",
+      ODAFdir,
+      "/",
+      FileName,
+      "_Norm_Relevant_Quantile_and_Spike_Filtered_Data.txt",
+      "... file location.",
+      "
+  Your Normalized and relevance filtered count data can be found in the ... ",
+      ODAFdir,
+      FileName,
+      "_Norm_and_Relevant_Data.txt",
+      "... file location.",
+      "
+      And your Normalized only data can be found in the ",
+      ODAFdir,
+      FileName,
+      "_Norm_Data.txt",
+      "... file location."
+    ))
+	
+	colnames(norm_data) <- colData(dds)[, DESIGN]
+
+	resListAll <- res_list
+	resList[[x]] <- DECounts_relevance_quantile_and_spike_filtered
+	
+	if (R_ODAF_plots == TRUE) {
+  	print("creating Read count Plots")
+  	# top DEGs
+  	plotdir <- file.path(paths$DEG_output, "plots")
+  	if (!dir.exists(plotdir)) {dir.create(plotdir, recursive = TRUE)}
+  	barplot.dir <- file.path(paths$DEG_output, "plots", "/barplot_genes/")
+  	if (!dir.exists(barplot.dir)) {dir.create(barplot.dir, recursive = TRUE)}
+  
+  	TOPbarplot.dir <- file.path(barplot.dir, "Top_DEGs")
+  	if (!dir.exists(TOPbarplot.dir)) {dir.create(TOPbarplot.dir, recursive = TRUE)}
+  	setwd(TOPbarplot.dir)
+  	draw.barplots(DEsamples, "top", 20) # (DEsamples, top_bottom, NUM)
+  	print("Top 20 DEG plots done")
+    
+  
+  	# Spurious spikes
+  	SPIKEbarplot.dir <- file.path(barplot.dir, "DE_Spurious_spikes")
+  	if (!dir.exists(SPIKEbarplot.dir)) {dir.create(SPIKEbarplot.dir, recursive = TRUE)}
+  	setwd(SPIKEbarplot.dir)
+  	draw.barplots(DECounts_spike, "top", nrow(DECounts_spike)) # (DEsamples, top_bottom, NUM)
+  	print("All DE_Spurious_spike plots done")
+    
+    #Set back to the original dir
+    setwd(original_dir)
+	}
+#############################################################################################################################################	
+
+}
+}
+
+save(resListAll, file = normalizePath(file.path(paths$RData, "resListAll.RData")))
+save(resList, file = normalizePath(file.path(paths$RData, "resList.RData")))
+```
+
+The code above (not shown by default) runs the R-ODAF spurious spike detection and outputs the DESeq Results objects as a list for each contrast. As specified by the R-ODAF guidelines, 75% of at least 1 group need to be above `r MinCount` CPM (default - 1 CPM) and spurious spikes were removed in which Max-Median > Sum/(Rep + 1).  
+
+The log2FoldChange shrinkage procedure used was `r resList[[1]]@priorInfo$type`. An alpha of `r resList[[1]]@metadata$alpha` was used to extract raw results, which are reported as the `r gsub(mcols(x=resList[[1]])$description[[4]],pattern=":.*",replacement="")`. To account for multiple testing, `r mcols(resList[[1]])$description[5]` are reported. Cook's cutoff was set to `r cooks` (default - FALSE) in this analysis.  
+
+
+## Create annotation tables
+
+```{r create_annotations_locally_on_machine_with_internet, eval=F}
+# library('AnnotationHub')
+# library('biomaRt')
+# library(GenomicFeatures)
+# library(rtracklayer)
+# library(rentrez)
+# library(dplyr)
+# library(readr)
+# setAnnotationHubOption("ASK", FALSE)
+# 
+# #############################################
+# #############
+# # Mouse #
+# #############
+# ensembl_species <- "mmusculus_gene_ensembl"
+# species_gene_symbol <- "mgi_symbol"
+# 
+# #############
+# # Zebrafish #
+# #############
+# ensembl_species <- "drerio_gene_ensembl"
+# species_gene_symbol <- "external_gene_name"
+# 
+# #################
+# # Rainbow trout #
+# #################
+# rainbowtrout
+# ensembl_species <- "omykiss_gene_ensembl"
+# species_gene_symbol <- "external_gene_name"
+# 
+# ##################
+# # Chinese Medaka #
+# ##################
+# chinesemedaka
+# ensembl_species <- "osinensis_gene_ensembl"
+# species_gene_symbol <- "external_gene_name"
+# 
+# ##################
+# # Fathead Minnow #
+# ##################
+# fatheadminnow
+# ensembl_species <- "ppromelas_gene_ensembl"
+# species_gene_symbol <- "external_gene_name"
+# #############################################
+# 
+# species <- if_else(
+#   ensembl_species == "drerio_gene_ensembl",
+#   "zebrafish",
+#   if_else(
+#     ensembl_species == "omykiss_gene_ensembl",
+#     "rainbowtrout",
+#     if_else(
+#       ensembl_species == "osinensis_gene_ensembl",
+#       "chinesemedaka",
+#       if_else(
+#         ensembl_species == "ppromelas_gene_ensembl",
+#         "fatheadminnow",
+#         if_else(
+#           ensembl_species == "mmusculus_gene_ensembl",
+#           "mouse",
+#           NA
+#         )
+#       )
+#     )
+#   )
+# )
+# biomart_filter <- "ensembl_gene_id"
+# 
+# #Note - useMart() will not work for Fathead Minnow
+# 
+# ensembl <- useMart("ensembl", dataset = ensembl_species,  host = "https://useast.ensembl.org") #West is no longer working
+# attributes <- listAttributes(ensembl)
+# #all_ensembl <- useMart("ensembl")
+# #all_datasets <- listDatasets(all_ensembl)
+# 
+# # Example generic gene IDs (for testing purposes)
+# #genes <- c("ENSDARG00000000001", "ENSDARG00000000002", "ENSDARG00000000003", "ENSDARG00000000018", "ENSDARG00000000019", "ENSDARG00000000068", "ENSDARG00000000069", "ENSOMYG00000042616", "ENSOMYG00000042616", "ENSOMYG00000042617", "ENSOMYG00000042618", "ENSOSIG00000001234", "ENSOSIG00000005678", "ENSOSIG00000009123", "ENSPPRG00000012345", "ENSPPRG00000067890", "ENSPPRG00000011223")
+# #genes <- lapply(resListAll,
+# #                function(x) row.names(as.data.frame(x)))
+# #genes <- unlist(genes) %>% unique()
+# 
+# if (species %in% c("zebrafish", "rainbowtrout", "hamster", "rat", "mouse", "human")) {
+#   ############################################################
+#   ### Zebrafish, Rainbow trout, Hamster, Rat, Mouse, Human ###
+#   ############################################################
+#   
+#   if (species == "zebrafish") {
+#     # Path to your local GFF/GTF file
+#     gtf_file <- "C:/Users/curryj/OneDrive - EC-EC/Desktop/tPOD_Curation_Project/tPOD_curation/annotationfiles/Danio_rerio.GRCz11.111.gtf"
+#   } else if (species == "rainbowtrout") {
+#     # Path to your local GFF/GTF file
+#     gtf_file <- "C:/Users/curryj/OneDrive - EC-EC/Desktop/tPOD_Curation_Project/tPOD_curation/annotationfiles/Oncorhynchus_mykiss.USDA_OmykA_1.1.112.gtf"
+#   } else if (species == "mouse") {
+#     gtf_file <- "C:/Users/curryj/OneDrive - EC-EC/Desktop/tPOD_Curation_Project/tPOD_curation/annotationfiles/Mus_musculus.GRCm39.112.gtf"
+#   } else {
+#     stop("No gtf annotation files in directory... please download")
+#   }
+#   
+#   # Import the GFF/GTF file
+#   annotations <- import(gtf_file)
+#   
+#   # Convert annotations to a data frame
+#   annotations_df <- as.data.frame(annotations)
+#   
+#   genes <- annotations_df %>%
+#     dplyr::pull(gene_id) %>%
+#     unique()
+#   
+#   id_table_entrez <- getBM(
+#     filters = biomart_filter,
+#     attributes = c(
+#       biomart_filter,
+#       species_gene_symbol,
+#       "description",
+#       "entrezgene_id",
+#       "entrezgene_accession"
+#     ),
+#     values = genes, #genes/all the genes in the genome
+#     mart = ensembl
+#   )
+#   
+#   if (species == "zebrafish") {
+#     readr::write_csv(id_table_entrez, "C:/Users/curryj/OneDrive - EC-EC/Desktop/tPOD_Curation_Project/tPOD_curation/annotationfiles/zebrafish_annotated_id_table_entrez_wholegenome.csv")    
+#   } else if (species == "rainbowtrout") {
+#     readr::write_csv(id_table_entrez, "C:/Users/curryj/OneDrive - EC-EC/Desktop/tPOD_Curation_Project/tPOD_curation/annotationfiles/rainbowtrout_annotated_id_table_entrez_wholegenome.csv") 
+#   } else if (species == "mouse") {
+#     readr::write_csv(id_table_entrez, "C:/Users/curryj/OneDrive - EC-EC/Desktop/tPOD_Curation_Project/tPOD_curation/annotationfiles/mouse_annotated_id_table_entrez_wholegenome.csv") 
+#   } else {
+#     print("No files written")
+#   }
+# 
+# } else if (species %in% c("chinesemedaka")) {
+#   ######################
+#   ### Chinese Medaka ###
+#   ######################
+#   
+#   # Path to your local GFF/GTF file
+#   gtf_file <- "C:/Users/curryj/OneDrive - EC-EC/Desktop/tPOD_Curation_Project/tPOD_curation/annotationfiles/Oryzias_sinensis.ASM858656v1.112.gtf"
+#   
+#   # Import the GFF/GTF file
+#   annotations <- import(gtf_file)
+#   
+#   # Convert annotations to a data frame
+#   annotations_df <- as.data.frame(annotations)
+#   
+#   genes <- annotations_df %>%
+#     dplyr::pull(gene_id) %>%
+#     unique()
+#   
+#   id_table_entrez <- getBM(filters = biomart_filter,
+#                            attributes = c(biomart_filter,
+#                                           species_gene_symbol,
+#                                           "description",
+#                                           "zfin_id_id",
+#                                           "zfin_id_symbol"),
+#                            values = genes,
+#                            mart = ensembl)
+#   
+#   readr::write_csv(id_table_entrez, "C:/Users/curryj/OneDrive - EC-EC/Desktop/tPOD_Curation_Project/tPOD_curation/annotationfiles/chinesemedaka_annotated_id_table_entrez_wholegenome.csv") 
+#   
+# } else if (species %in% c("fatheadminnow")) {
+#   ######################
+#   ### Fathead Minnow ###
+#   ######################
+#   
+#   #No BioMart is available so all information is strictly from the .gtf file
+#   
+#   # Path to your local GFF/GTF file
+#   gtf_file <- "C:/Users/curryj/OneDrive - EC-EC/Desktop/tPOD_Curation_Project/tPOD_curation/annotationfiles/FHM_genomic.gtf"
+#   
+#   # Import the GFF/GTF file
+#   annotations <- import(gtf_file)
+#   
+#   # Convert annotations to a data frame
+#   annotations_df <- as.data.frame(annotations)
+#   
+#   # Extract product information for transcripts and exons
+#   transcript_exon_products <- annotations_df %>%
+#     dplyr::filter(type %in% c("transcript", "exon", "CDS", "start_codon", "stop_codon")) %>%
+#     dplyr::select(gene_id, product) %>%
+#     dplyr::filter(!is.na(product)) %>%
+#     dplyr::distinct()
+#   
+#   # Aggregate product information at the gene level
+#   gene_products <- transcript_exon_products %>%
+#     dplyr::group_by(gene_id) %>%
+#     dplyr::summarize(product = paste(unique(product), collapse = "; "), .groups = 'drop')
+#   
+#   # Add product information to gene annotations
+#   annotations_df <- annotations_df %>%
+#     dplyr::left_join(gene_products, by = "gene_id") %>%
+#     dplyr::mutate(product = dplyr::coalesce(product.y, product.x)) %>%
+#     dplyr::select(-product.x, -product.y)
+#   
+#   # Filter for genes and select relevant columns
+#   gene_annotations_df <- annotations_df %>%
+#     dplyr::filter(type == "gene") %>%
+#     dplyr::select(seqnames, start, end, strand, gene_id, db_xref, product)
+#   
+#   annotations_df <- gene_annotations_df %>%
+#     dplyr::mutate(ensembl_gene_id = gsub("GeneID:", "", db_xref)) %>%
+#     dplyr::mutate(entrezgene_id = ensembl_gene_id) %>%
+#     dplyr::mutate(external_gene_name = gene_id) %>%
+#     dplyr::mutate(entrezgene_accession = gene_id) %>%
+#     dplyr::rename(description = product) %>%
+#     dplyr::select(ensembl_gene_id, external_gene_name, description, entrezgene_id, entrezgene_accession)
+#   
+#   readr::write_csv(annotations_df, "C:/Users/curryj/OneDrive - EC-EC/Desktop/tPOD_Curation_Project/tPOD_curation/annotationfiles/fatheadminnow_annotated_id_table_entrez_wholegenome.csv") 
+#   
+# }
+
+```
+
+```{r}
+################################################################################
+# Annotations
+################################################################################
+# Compile list of all potentially relevant genes
+if (Platform == "RNA-Seq") {
+	genes <- lapply(resListAll,
+    	            function(x) row.names(as.data.frame(x)))
+	genes <- unlist(genes) %>% unique()
+} else if (Platform == "TempO-Seq") {
+	# NOTE: The original R-ODAF code for annotating TEMPO-SEQ data is old, outdated and does not work with manifests availbale on biospyder's website
+	# It is not advisable to filter the probes by gene ID and gene name/ensembl id because probes come from transcripts. multiple probes can come from a single gene, so you lose that detail if you do what I've done here... I don't really care though because a DEG analysis is not my main priority here... it is BMDs and tPODs which will still have unique probe IDs.
+	# Extract the result probes
+	genes <- lapply(resListAll,
+    	            function(x) row.names(as.data.frame(x)))
+	genes <- unlist(genes) %>% unique()
+	# Extract gene symbols from the 'genes' list
+	gene_ids <- sapply(genes, function(x) strsplit(x, "_")[[1]][1])
+	gene_ids <- tibble(GENE_SYMBOL = gene_ids, PROBE = names(gene_ids))
+	# load the manifest
+	temposeq_genes <- readr::read_csv(normalizePath(file.path(projectdir, "genome", temposeq_manifest))) #Note - You will have to include this file in the genome directory. Original file copy can be found in project dir.
+	# Filter the manifest by probe names that match the results in resList
+	#gene_ids <- temposeq_genes %>%
+	#	dplyr::filter(PROBE_NAME %in% genes) %>%
+	#	pull(GENE_SYMBOL)
+	# Now load the annotation file with the ensembl gene ids
+	id_table_entrez_all_genes <- readr::read_csv(normalizePath(file.path(projectdir, "genome", paste0(species, "_annotated_id_table_entrez_wholegenome.csv")))) #Note - You will have to include this file in the genome directory. Original file copy can be found in project dir.
+	# Filter the gene id column by those gene ids from the filtered manifest
+	id_table_entrez <- gene_ids %>%
+	  dplyr::left_join(id_table_entrez_all_genes, by = c("GENE_SYMBOL" = species_gene_symbol), keep = TRUE) %>%
+  	  dplyr::mutate(
+    	!!sym(biomart_filter) := if_else(is.na(!!sym(biomart_filter)), NA_character_, !!sym(biomart_filter)),
+   		!!sym(species_gene_symbol) := if_else(is.na(!!sym(species_gene_symbol)), NA_character_, !!sym(species_gene_symbol)),
+    	description = if_else(is.na(description), NA_character_, description),
+   		entrezgene_id = if_else(is.na(entrezgene_id), NA_integer_, entrezgene_id),
+   		entrezgene_accession = if_else(is.na(entrezgene_accession), NA_character_, entrezgene_accession),
+    	PROBE = if_else(is.na(PROBE), GENE_SYMBOL, PROBE)
+  	  ) %>%
+      dplyr::filter(PROBE %in% genes) %>%
+	  dplyr::select(!!sym(biomart_filter), !!sym(species_gene_symbol), description, entrezgene_id, entrezgene_accession, PROBE)
+	save(id_table_entrez, file = normalizePath(file.path(paths$RData, "id_table.RData")))
+	id_table <- distinct(id_table_entrez[, c(1,2,3,6)])
+	missing_genes <- setdiff(genes, id_table$PROBE)
+}
+
+
+if (any(species %in% c("zebrafish", "rainbowtrout", "hamster", "rat", "mouse", "human", "chinesemedaka")) & Platform == "RNA-Seq") {
+
+  if (file.exists(normalizePath(file.path(paths$RData, "id_table.RData"))) & params$use_cached_RData == TRUE) {
+
+    print(paste("Already found ID table; loading from disk."))
+    load(normalizePath(file.path(paths$RData, "id_table.RData")))
+    id_table <- distinct(id_table_entrez[, 1:3])
+
+    } else {
+    
+    id_table_entrez_all_genes <- readr::read_csv(normalizePath(file.path(paths$metadata, "genome", paste0(species, "_annotated_id_table_entrez_wholegenome.csv")))) #Note - You will have to include this file in the genome directory. Original file copy can be found in project dir.
+    id_table_entrez <- id_table_entrez_all_genes %>%
+      dplyr::filter(ensembl_gene_id %in% genes) %>%
+      distinct()
+    save(id_table_entrez, file = normalizePath(file.path(paths$RData, "id_table.RData")))
+    id_table <- distinct(id_table_entrez[, 1:3])
+
+  }
+
+} else if (any(species %in% c("fatheadminnow")) & Platform == "RNA-Seq") {
+
+    print("Fathead Minnow is not available in BiomaRt and Ensemble and Entrez IDs are not available... Only ZFIN IDs are available... Local annotation will begin.")
+
+    if (file.exists(normalizePath(file.path(paths$RData, "id_table.RData"))) & params$use_cached_RData == TRUE) {
+
+      print(paste("Already found ID table; loading from disk."))
+      load(file.path(paths$RData, "id_table.RData"))
+      id_table <- distinct(id_table_entrez[, 1:3])
+
+    } else {
+
+     id_table_entrez_all_genes <- readr::read_csv(normalizePath(file.path(paths$metadata, "genome", paste0(species, "_annotated_id_table_entrez_wholegenome.csv")))) #Note - You will have to include this file in the genome directory. Original file copy can be found in project dir.
+    id_table_entrez <- id_table_entrez_all_genes %>%
+      dplyr::filter(external_gene_name %in% genes) %>%
+      distinct()
+    save(id_table_entrez, file = file.path(paths$RData, "id_table.RData"))
+    id_table <- distinct(id_table_entrez[, 1:3])
+    id_table$ensembl_gene_id <- as.character(id_table$ensembl_gene_id)
+
+    }
+} else if (Platform == "RNA-Seq") {
+
+  print("Species not recognized. Annotations will not be loaded")
+
+} else {
+
+	print("TempO-Seq data!")
+
+}
+
+# Check if id_table is empty
+if (nrow(id_table) == 0) {
+  print("Warning: id_table is empty.")
+} 
+if (nrow(id_table) != length(genes)) {
+  print("Warning: nrow(id_table) is not equal to length(genes)")
+}
+if (Platform == "TempO-Seq") {
+	print(paste("Warning: missing", length(missing_genes), "genes from id_table"))
+}
+
+print("id_table and id_table_entrez loaded successfully.")
+```
+
+```{r annotation_table_kable, eval = F}
+knitr::kable(id_table_entrez,
+             row.names = F,
+             col.names = c("Ensembl gene id", "External database gene name", "Gene description", "Entrez gene id", "Entrez gene name"),
+             caption = "All gene annotations from filtered results") %>%
+  kable_styling(bootstrap_options = "striped", full_width = F, position = "left") %>%
+  scroll_box(width = "100%", height = "480px")
+```
+
+## Create summary tables
+
+```{r create_tables, collapse = TRUE, warning = FALSE, message = FALSE, eval = flag}
+################################################################################
+# Table modifications
+################################################################################
+
+#### THIS SECTION AND FOLLOWING SECTIONS NEED TO BE UPDATED FOR FATHEAD MINNNOW!
+
+annotate_deseq_table <-
+  function(deseq_results_list,
+           filter_results = FALSE,
+           join_by = join_by) {
+    annotated_results <- list()
+    all_empty <- TRUE
+    for (i in seq_along(deseq_results_list)) {
+      deg_table <- deseq_results_list[[i]]
+      if (nrow(deg_table) == 0)
+        next
+      all_empty <- FALSE
+      deg_table <-
+        cbind(
+          genes = row.names(deg_table),
+          as.data.frame(deg_table),
+          contrast = gsub(
+            paste0("log2.*", DESIGN, " "),
+            "",
+            deg_table@elementMetadata[[2]][2]
+          )
+        )
+      #dummy_contrast <- unique(deg_table$contrast)
+      names(deg_table)[names(deg_table) == "genes"] <- join_by
+      deg_table <-
+        dplyr::left_join(deg_table, id_table, by = join_by)
+      if (nrow(deg_table) == 0) {
+        print("Warning: Join resulted in an empty dataframe!")
+      }
+      deg_table <-
+        dplyr::mutate(deg_table,
+                      linearFoldChange = if_else(
+                        as.numeric(log2FoldChange) > 0,
+                        2 ^ as.numeric(log2FoldChange),-1 / (2 ^ as.numeric(log2FoldChange))
+                      ))
+      deg_table <-
+        if (Platform == "RNA-Seq") {
+          dplyr::select(
+            deg_table,!!sym(biomart_filter),!!sym(species_gene_symbol),
+            description,
+            baseMean,
+            log2FoldChange,
+            linearFoldChange,
+            lfcSE,
+            pvalue,
+            padj,
+            contrast
+          )
+        } else if (Platform == "TempO-Seq") {
+          dplyr::select(
+            deg_table,!!sym(biomart_filter),!!sym(species_gene_symbol),!!sym(join_by),
+            description,
+            baseMean,
+            log2FoldChange,
+            linearFoldChange,
+            lfcSE,
+            pvalue,
+            padj,
+            contrast
+          )
+        }
+      if (filter_results &&
+          "linearFoldChange" %in% colnames(deg_table) &&
+          nrow(deg_table) > 0) {
+        deg_table <-
+          dplyr::filter(deg_table,!is.na(padj) &
+                          padj < alpha &
+                          abs(linearFoldChange) > linear_fc_filter)
+      }
+      if (nrow(deg_table) > 0) {
+        annotated_results[[i]] <- distinct(deg_table)
+      }
+    }
+    if (all_empty) {
+      print("All DESeq2 results were empty. Returning dummy result.")
+      dummy_contrast <- gsub(paste0("log2.*", DESIGN, " "), "", deg_table@elementMetadata[[2]][2])
+      if (Platform == "RNA-Seq") {
+        # Define a dummy result
+        dummy_result <- data.frame(
+          temp_col1 = "DUMMY",
+          temp_col2 = "DUMMY",
+          description = "No results",
+          baseMean = 0,
+          log2FoldChange = 0,
+          linearFoldChange = 1,
+          lfcSE = 0,
+          pvalue = 1,
+          padj = 1,
+          contrast = dummy_contrast
+        )
+        names(dummy_result)[1:2] <-
+          c(biomart_filter, species_gene_symbol)
+      } else if (Platform == "TempO-Seq") {
+        # Define a dummy result
+        dummy_result <- data.frame(
+          temp_col1 = "DUMMY",
+          temp_col2 = "DUMMY",
+          temp_col3 = "DUMMY",
+          description = "No results",
+          baseMean = 0,
+          log2FoldChange = 0,
+          linearFoldChange = 1,
+          lfcSE = 0,
+          pvalue = 1,
+          padj = 1,
+          contrast = dummy_contrast
+        )
+        names(dummy_result)[1:3] <-
+          c(biomart_filter, species_gene_symbol, join_by)
+      }
+      return(dummy_result)
+    }
+    return(data.table::rbindlist(annotated_results))
+  }
+
+# Ensure alpha and linear_fc_filter are set correctly
+print(alpha)
+alpha <- params$fdr_threshold
+print(linear_fc_filter)
+linear_fc_filter <- params$linear_fc_filter
+
+# Write dataframe of all results
+# Significant only
+significantResults <- annotate_deseq_table(resList, filter_results = T, join_by = if_else(condition = Platform == "TempO-Seq", true = "PROBE", false = if_else(condition = species == "fatheadminnow", true = species_gene_symbol, false = biomart_filter)))
+significantResults <- significantResults %>% dplyr::mutate(contrast = as.factor(contrast))
+
+print(paste("Total number of significant results:", nrow(significantResults)))
+
+# Set 'anyDEGs' to specify what should be evaluated if there are no DEGs to display in the report
+if (any(significantResults[[species_gene_symbol]] == "DUMMY", na.rm = TRUE)) {
+  print(paste0("significantResults is empty."))
+  anyDEGs <- FALSE # For setting evaluation logic
+} else {
+  anyDEGs <- TRUE # For setting evaluation logic
+}
+
+# All results including non-significant
+allResults <- annotate_deseq_table(resListAll, filter_results = F, join_by = if_else(condition = Platform == "TempO-Seq", true = "PROBE", false = if_else(condition = species == "fatheadminnow", true = species_gene_symbol, false = biomart_filter)))
+allResults <- allResults %>% dplyr::mutate(contrast = as_factor(contrast))
+
+
+if (Platform == "RNA-Seq") {
+	# All Results for Plotting
+	# Replace NA gene symbols with ensembl ID
+	allResults[[species_gene_symbol]][is.na(allResults[[species_gene_symbol]])] <- allResults[[biomart_filter]][is.na(allResults[[species_gene_symbol]])] 
+	# Replace blank gene symbols with ensembl ID
+	allResults[[species_gene_symbol]][allResults[[species_gene_symbol]] == ""]  <- allResults[[biomart_filter]][allResults[[species_gene_symbol]] == ""]
+} else if (Platform == "TempO-Seq") {
+	# All Results for Plotting
+	# Replace NA gene symbols with PROBE ID
+	allResults[[species_gene_symbol]][is.na(allResults[[species_gene_symbol]])] <- allResults[["PROBE"]][is.na(allResults[[species_gene_symbol]])] 
+	# Replace blank gene symbols with PROBE ID
+	allResults[[species_gene_symbol]][allResults[[species_gene_symbol]] == ""]  <- allResults[["PROBE"]][allResults[[species_gene_symbol]] == ""]
+}
+
+
+IPA <- allResults %>% 
+  distinct() %>% 
+  pivot_wider(names_from = contrast, values_from = c(log2FoldChange, linearFoldChange, lfcSE, pvalue, padj))
+allResults$padj[allResults$padj == 0] <- 10^-100 # For plotting purposes!
+allResultsOrdered_logFC_filter <- dplyr::filter(allResults, abs(linearFoldChange) > 1.5) %>%
+  arrange(-abs(linearFoldChange))
+allResultsOrdered_logFC_filter <- dplyr::filter(allResultsOrdered_logFC_filter, padj < alpha)
+res.df <- allResultsOrdered_logFC_filter
+
+degTable <- significantResults %>%
+  dplyr::group_by(contrast) %>%
+  dplyr::count() %>%
+  dplyr::mutate(
+    # Extract numeric part from contrast using sub and convert to numeric
+    sort_key = as.numeric(sub(" .*", "", contrast))
+  ) %>%
+  # Arrange rows based on the numeric sort_key in ascending order
+  dplyr::arrange(sort_key) %>%
+  dplyr::select(-sort_key)  # Remove the temporary sorting key column
+
+# Set factor levels for contrast based on the sorted order
+degTable$contrast <- factor(degTable$contrast, levels = degTable$contrast)
+
+lengths <- lapply(resList, nrow)
+longest <- which.max(lengths)
+all_zero <- all(unlist(lengths) == 0)
+if (all_zero) {
+  summaryTable <- data.frame( genes =  "DUMMY",
+                            baseMean =  0)
+} else {
+  summaryTable <- data.frame( genes =  row.names(resList[[longest]]),
+                            baseMean = resList[[longest]]$baseMean )
+}
+col_name <- if_else(condition = Platform == "RNA-Seq", true = biomart_filter, false = "PROBE")
+names(summaryTable)[names(summaryTable) == "genes"] <- col_name
+contrastsInSummary <- vector()
+for (i in 1:length(resList)) {
+  print(i)
+  n <- resList[[i]]@elementMetadata[[2]][2]
+  n <- gsub(pattern = paste0("log2\ fold\ change\ \\(MMSE\\):\ ", DESIGN), # Might need to be MLE for some tests
+            replacement =  paste0("log2 Fold Change"),
+            x = resList[[i]]@elementMetadata[[2]][2])
+  p <- gsub(pattern = paste0("log2\ fold\ change\ \\(MMSE\\):\ ", DESIGN),
+           replacement =  resList[[i]]@elementMetadata[[2]][6], # Not used?
+           x = resList[[i]]@elementMetadata[[2]][2])
+  q <- gsub(pattern = paste0("log2\ fold\ change\ \\(MMSE\\):\ ", DESIGN, "\ "),
+            replacement =  "",
+            x = resList[[i]]@elementMetadata[[2]][2])
+  message(n)
+  message(p)
+  message(q)
+  toJoin <- as.data.frame(resList[[i]])
+  setDT(toJoin, keep.rownames = T)[]
+  setnames(toJoin, 1, col_name)
+  toJoin <- dplyr::mutate(toJoin, linearFoldChange = ifelse(log2FoldChange > 0,
+                                                2 ^ log2FoldChange,
+                                                -1 / (2 ^ log2FoldChange)))
+  toJoin <- toJoin[, c(1:3, 7, 4:6)]
+  summaryTable <- dplyr::left_join(summaryTable, dplyr::select(toJoin, !c(baseMean, pvalue, lfcSE)), by = col_name)
+
+  names(summaryTable)[[ncol(summaryTable) - 2]] <- paste0("log2FoldChange_", i)
+  names(summaryTable)[[ncol(summaryTable) - 1]] <- paste0("linearFoldChange_", i)
+  names(summaryTable)[[ncol(summaryTable)]] <- paste0("FDR_", i)
+  contrastsInSummary[i] <- q
+  print(summary(resList[[i]], pAdjValue))
+}
+
+maxFCs <- allResults %>%
+  dplyr::group_by(!!sym(biomart_filter)) %>%
+  dplyr::filter(abs(linearFoldChange) == max(abs(linearFoldChange))) %>%
+  dplyr::ungroup()
+
+if (Platform == "RNA-Seq") {
+	maxFCs <- maxFCs %>%
+		dplyr::select(!!sym(biomart_filter), linearFoldChange)
+} else if (Platform == "TempO-Seq") {
+	maxFCs <- maxFCs %>%
+		dplyr::select(!!sym(biomart_filter), PROBE, linearFoldChange)
+}
+
+minPvals <- allResults %>%
+  group_by(!!sym(biomart_filter)) %>%
+  dplyr::filter(padj == min(padj)) %>%
+  dplyr::ungroup()
+
+if (Platform == "RNA-Seq") {
+	minPvals <- minPvals %>%
+		dplyr::select(!!sym(biomart_filter), padj)
+} else if (Platform == "TempO-Seq") {
+	minPvals <- minPvals %>%
+		dplyr::select(!!sym(biomart_filter), PROBE, padj)
+}
+
+summaryTable <- summaryTable %>%
+  left_join(id_table) %>%
+  left_join(maxFCs) %>%
+  left_join(minPvals) %>%
+  dplyr::rename(maxFoldChange = linearFoldChange,
+         minFDR_pval = padj) %>%
+  dplyr::distinct() %>%
+  mutate(maxFoldChange = abs(maxFoldChange)) # This eliminates the direction of change: this way it's easy to sort.
+
+numColsToPrepend <- ncol(summaryTable) - 3*length(resList) - 2 # Number of columns per contrast = 3. Subtract two for the baseMean and genes columns.
+colPositionsToPrependSTART <- ncol(summaryTable) - numColsToPrepend + 1
+colPositionsOfData <- ncol(summaryTable) - numColsToPrepend
+summaryTable <- summaryTable[, c(1,
+                                colPositionsToPrependSTART:ncol(summaryTable),
+                                2:colPositionsOfData)]
+summaryTable <- summaryTable %>% dplyr::distinct() # Just in case duplicates snuck by
+
+CPMddsDF <- data.frame(genes = row.names(CPMdds), CPMdds, check.names = F)
+if (Platform == "RNA-Seq") {
+	CPMddsDF <- dplyr::left_join(CPMddsDF, id_table, by = c("genes" = biomart_filter))
+} else if (Platform == "TempO-Seq") {
+	CPMddsDF <- dplyr::left_join(CPMddsDF, id_table, by = c("genes" = "PROBE"))
+}
+numColsToPrepend <- ncol(CPMddsDF) - ncol(CPMdds) - 1
+colPositionsToPrependSTART <- ncol(CPMddsDF) - numColsToPrepend + 1
+colPositionsOfData <- ncol(CPMddsDF) - numColsToPrepend
+CPMddsDF <- CPMddsDF[, c(1, colPositionsToPrependSTART:ncol(CPMddsDF), 2:colPositionsOfData)]
+
+
+```
+
+The code above (not shown by default) generates tables summarizing the differentially expressed genes (DEGs).  A linear fold change cutoff of `r linear_fc_filter` and adjusted p-value of `r alpha` was used to filter the results.
+
+Here is the number of DEGs in each group:
+
+```{r 'display_DEG_summary', eval = anyDEGs}
+kable(degTable,
+      caption = "Number of differentially expressed genes across each contrast") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+```
+
+```{r display_DEG_summary_barplot, fig.height=6, fig.width=4, out.width='100%', out.height='100%', eval = anyDEGs}
+degTable %>%
+  ggplot(aes(x = contrast, y = n)) +
+    geom_bar(stat = "identity") +
+    theme_minimal() +
+    labs(title = "DEG Counts by Contrast",
+        x = "Contrast",
+        y = "Count")
+```
+
+```{r 'write-tables', collapse = TRUE, warning = FALSE, message = FALSE, eval = flag}
+#######################################
+### Write results table from DESeq2
+#######################################
+write.table(allResults,
+            file = file.path(paths$DEG_output,
+                             paste0("/", NORM_TYPE, "-DESeq_output_ALL.txt")),
+            quote = F, sep = '\t', col.names = NA)
+write.table(significantResults,
+            file = paste0(paths$DEG_output,
+                             paste0("/", NORM_TYPE, "-DESeq_output_significant.txt")),
+            quote = F, sep = '\t', col.names = NA)
+write.table(summaryTable,
+            file = paste0(paths$DEG_output,
+                             paste0("/", NORM_TYPE, "-DESeq_output_all_genes.txt")),
+            quote = F, sep = '\t', col.names = NA)
+write.table(CPMddsDF,
+            file = paste0(paths$DEG_output,
+                             paste0("/", NORM_TYPE, "-Per_sample_CPM.txt")),
+            quote = F, sep = '\t', col.names = NA)
+write.table(Counts,
+            file = paste0(paths$DEG_output,
+                             paste0("/", NORM_TYPE, "-Per_sample_normalized_counts.txt")),
+            quote = F, sep = '\t', col.names = NA)
+```
+
+The code above (not shown by default) writes text files for each DEG summary type.
+
+# Write data
+
+```{r 'write-excel-worksheets', collapse = TRUE, warning = FALSE, message = FALSE, eval = flag}
+#######################################
+### Write results above but in Excel
+#######################################
+### Global options
+options("openxlsx.borderColour" = "#4F80BD")
+options("openxlsx.borderStyle" = "thin")
+options("openxlsx.maxWidth" = 50)
+hs1 <- createStyle(textDecoration = "Bold",
+                   border = "Bottom",
+                   fontColour = "black")
+hs2 <- createStyle(textDecoration = "Bold",
+                   border = c("top", "bottom", "left", "right"),
+                   fontColour = "black",
+                   fgFill = "#C5D9F1")
+
+### Summary results - one gene per line, columns are contrasts
+wb1 <- createWorkbook()
+modifyBaseFont(wb1, fontSize = 10, fontName = "Arial Narrow")
+addWorksheet(wb1, "DESeq_results_per_gene")
+for (j in 1:length(contrastsInSummary)) {
+  myStartcol = 7 + ((j - 1) * 3)
+  myEndcol = 9 + ((j - 1) * 3)
+  mergeCells(wb1,
+             sheet = 1,
+             cols = myStartcol:myEndcol,
+             rows = 1)
+  writeData(
+    wb1,
+    sheet = 1,
+    x = contrastsInSummary[j],
+    startCol = myStartcol,
+    startRow = 1)
+}
+conditionalFormatting(wb1,
+                      sheet = 1,
+                      rows = 1,
+                      cols = 1:ncol(summaryTable),
+                      type = "contains",
+                      rule = "",
+                      style = hs2)
+freezePane(wb1, sheet = 1, firstActiveRow = 3, firstActiveCol = 4)
+writeDataTable(wb1,
+               sheet = 1,
+               startRow = 2,
+               x = summaryTable,
+               colNames = TRUE,
+               rowNames = F,
+               tableStyle = "none",
+               headerStyle = hs1,
+               keepNA = T,
+               na.string = "NA")
+setColWidths(wb1, sheet = 1, cols = 1:6, widths = "auto") # This is hard-coded, so prone to error; will only impact auto adjustment of col widths.
+setColWidths(wb1, sheet = 1, cols = 7:ncol(summaryTable), widths = 13) # This is hard-coded, so prone to error; will only impact auto adjustment of col widths.
+fname1 <- normalizePath(file.path(paths$DEG_output, paste0("1.", NORM_TYPE, "-DESeq_by_gene.xlsx")))
+saveWorkbook(wb1, fname1, overwrite = TRUE)
+
+### All results in one table
+wb2 <- createWorkbook()
+modifyBaseFont(wb2, fontSize = 10, fontName = "Arial Narrow")
+addWorksheet(wb2, paste0("FDR", pAdjValue, ".Linear.FC.", linear_fc_filter))
+freezePane(wb2, sheet = 1, firstRow = TRUE, firstActiveCol = 4)
+writeDataTable(wb2,
+               sheet = 1,
+               x = significantResults,
+               colNames = TRUE,
+               rowNames = F,
+               tableStyle = "none",
+               headerStyle = hs1,
+               keepNA = T,
+               na.string = "NA")
+setColWidths(wb2, sheet = 1, cols = 1:ncol(significantResults), widths = "auto")
+addWorksheet(wb2, "DESeq_all_results")
+freezePane(wb2, sheet = 2, firstRow = TRUE, firstActiveCol = 4)
+writeDataTable(wb2,
+               sheet = 2,
+               x = allResults,
+               colNames = TRUE,
+               rowNames = F,
+               tableStyle = "none",
+               headerStyle = hs1,
+               keepNA = T,
+               na.string = "NA")
+setColWidths(wb2, sheet = 2, cols = 1:ncol(allResults), widths = "auto")
+fname2 <- normalizePath(file.path(paths$DEG_output, paste0("2.", NORM_TYPE, "-DESeq_all.xlsx")))
+saveWorkbook(wb2, fname2, overwrite = TRUE)
+
+### All results with different tabs for each contrast
+wb3 <- createWorkbook()
+modifyBaseFont(wb3, fontSize = 10, fontName = "Arial Narrow")
+
+short_contrast_names <- stringr::str_trunc(short_contrast_names,
+                                           31,
+                                           side = "right",
+                                           ellipsis = "")
+
+for (i in 1:length(levels(factor(allResults$contrast)))) {
+  print(i)
+  dataToWrite <- allResults[allResults$contrast == levels(factor(allResults$contrast))[i],]
+  addWorksheet(wb3, short_contrast_names[i])
+  freezePane(wb3, sheet = i, firstRow = TRUE, firstActiveCol = 4)
+  writeDataTable(wb3,
+                 sheet = i,
+                 x = dataToWrite,
+                 colNames = TRUE,
+                 rowNames = F,
+                 tableStyle = "none",
+                 headerStyle = hs1,
+                 keepNA = T,
+                 na.string = "NA")
+  setColWidths(wb3, sheet = i, cols = 1:ncol(dataToWrite), widths = "auto")
+}
+fname3 <- normalizePath(file.path(paths$DEG_output, paste0("3.", NORM_TYPE, "-DESeq_by_contrast.xlsx")))
+saveWorkbook(wb3, fname3, overwrite = TRUE)
+
+### CPM
+wb4 <- createWorkbook()
+modifyBaseFont(wb4, fontSize = 10, fontName = "Arial Narrow")
+addWorksheet(wb4, "Counts per million")
+freezePane(wb4, sheet = 1, firstRow = TRUE, firstActiveCol = 4)
+writeDataTable(wb4,
+               sheet = 1,
+               x = as.data.frame(CPMddsDF),
+               colNames = TRUE,
+               rowNames = F,
+               tableStyle = "none",
+               headerStyle = hs1,
+               keepNA = T,
+               na.string = "NA")
+setColWidths(wb4, sheet = 1, cols = 1:ncol(CPMddsDF), widths = "auto")
+fname4 <- normalizePath(file.path(paths$DEG_output, paste0("4.", NORM_TYPE, "-CPM.xlsx")))
+saveWorkbook(wb4, fname4, overwrite = TRUE)
+
+### IPA
+wb5 <- createWorkbook()
+modifyBaseFont(wb5, fontSize = 10, fontName = "Arial Narrow")
+addWorksheet(wb5, "For IPA upload")
+freezePane(wb5, sheet = 1, firstRow = TRUE, firstActiveCol = 5)
+writeDataTable(wb5,
+               sheet = 1,
+               x = as.data.frame(IPA),
+               colNames = TRUE,
+               rowNames = F,
+               tableStyle = "none",
+               headerStyle = hs1,
+               keepNA = T,
+               na.string = "NA")
+setColWidths(wb5, sheet = 1, cols = 1:ncol(IPA), widths = "auto")
+fname5 <- normalizePath(file.path(paths$DEG_output, paste0("5.", NORM_TYPE, "-IPA.xlsx")))
+saveWorkbook(wb5, fname5, overwrite = TRUE)
+
+```
+
+The code above (not shown by default) writes Excel workbooks and text files of DEG lists.
+
+These files should be provided to you as a separate zip file.
+
+```{r 'embed_excel_files', eval = embedFiles}
+# setwd(paths$DEG_output)
+# xfun::embed_files(list.files(".", "[.](xlsx)$"), name = "RNASeq_Spreadsheets.zip")
+```
+
+```{r 'embed_text_files', eval = embedFiles}
+# setwd(paths$DEG_output)
+# xfun::embed_files(list.files(".", "[.](txt)$"), name = "RNASeq_Text_Files.zip")
+```
+
+```{r 'embed_ODAF_files', eval = embedFiles}
+# setwd(paths$DEG_output)
+# xfun::embed_dir(ODAFdir, name = "RNASeq_R-ODAF_text_files.zip")
+```
+
+
+# PCA Plots {.tabset .tabset-fade}
+
+## All `r nrow(assay(rld))` genes, before filtering
+
+```{r 'PCA', fig.width=10, fig.height=8, eval=rlogTransformPossible}
+## Perform PCA analysis and make plot
+gg_PCA_all_genes <- plotPCA(rld, intgroup = params$design, ntop = nrow(assay(rld))) + 
+  theme(legend.position = "bottom") +
+  guides(color = guide_legend(ncol = 3))
+ggsave(gg_PCA_all_genes, file = normalizePath(file.path(paths$DEG_output, "plots", "PCA_all_genes.pdf")))
+## Get percent of variance explained
+data_pca <- plotPCA(rld, intgroup = params$design, ntop = nrow(assay(rld)), returnData = TRUE)
+percentVar <- round(100 * attr(data_pca, "percentVar"))
+print(paste("PCA 1 =", percentVar[1]))
+print(paste("PCA 2 =", percentVar[2]))
+```
+
+```{r PCA_image, fig.width=10, fig.height=8, out.width='100%', out.height='100%', eval=rlogTransformPossible}
+#knitr::include_graphics(path = normalizePath(file.path(paths$DEG_output, "plots", "PCA_all_genes.pdf")), error = FALSE, rel_path = FALSE, out.width='100%', out.height='100%')
+gg_PCA_all_genes
+```
+
+This plot shows the first two principal components that explain the variability in the data using the regularized log count data. If you are unfamiliar with principal component analysis, you might want to check the [Wikipedia entry](https://en.wikipedia.org/wiki/Principal_component_analysis) or this [interactive explanation](http://setosa.io/ev/principal-component-analysis/). Please view the figure axes, if possible, to see how much variance can be explained by each PC variable.
+
+## DEGs only (`r length(unique(significantResults[[biomart_filter]]))` genes)
+
+```{r 'PCA_DEGs', fig.width=10, fig.height=8, eval = rlogTransformPossible & anyDEGs}
+# Ensure significantResults is not empty
+#if (length(unique(significantResults[[biomart_filter]])) == 0) {
+#  stop("No significant results found.")
+#}
+
+# Subset the rld object
+if (Platform == "RNA-Seq") {
+  if (species == "fatheadminnow") {
+    rld_degs <- rld[row.names(assay(rld)) %in% significantResults[[species_gene_symbol]],]
+  } else {
+    rld_degs <- rld[row.names(assay(rld)) %in% significantResults[[biomart_filter]],]
+  }
+} else if (Platform == "TempO-Seq") {
+	rld_degs <- rld[row.names(assay(rld)) %in% significantResults[["PROBE"]],]
+}
+
+
+# Print dimensions of rld_degs
+print(paste("Dimensions of rld_degs:", dim(rld_degs)))
+
+# Check if rld_degs has non-zero dimensions
+if (nrow(rld_degs) == 0 || ncol(rld_degs) == 0) {
+  stop("rld_degs has zero rows or columns. Check your significantResults and rld object.")
+}
+
+## Perform PCA analysis and make plot
+gg_PCA_sig_genes <- plotPCA(rld_degs, intgroup = params$design, ntop = nrow(rld_degs)) +
+  theme(legend.position = "bottom") +
+  guides(color = guide_legend(ncol = 3))
+
+# Save the plot
+ggsave(gg_PCA_sig_genes, file = normalizePath(file.path(paths$DEG_output, "plots", "PCA_sig_genes.pdf")))
+
+# Perform PCA and get the data
+PCAplotDEGs <- plotPCA(rld_degs, intgroup = params$design, ntop = nrow(rld_degs), returnData = TRUE)
+
+## Get percent of variance explained
+percentVarDEGs <- round(100 * attr(PCAplotDEGs, "percentVar"))
+print(paste("PCA 1 =", percentVarDEGs[1]))
+print(paste("PCA 2 =", percentVarDEGs[2]))
+```
+
+```{r 'PCA_DEGs_image', fig.width=10, fig.height=8, out.width='100%', out.height='100%', eval = rlogTransformPossible & anyDEGs}
+# Include the plot in the report
+#knitr::include_graphics(path = normalizePath(file.path(paths$DEG_output, "plots", "PCA_sig_genes.pdf")), error = FALSE, rel_path = FALSE, out.width='100%', out.height='100%')
+gg_PCA_sig_genes
+```
+
+This plot shows the principal components analysis limited to all DEGs. In this case, the first and second principal component explain (see above) and (see above) percent of the variance respectively.
+
+## Top `r nBest` most variable genes only
+
+```{r 'PCA_top', fig.width=10, fig.height=8, eval=rlogTransformPossible}
+
+# Run this code only once for both the PCA and clustering analysis
+rv = rowVars(assay(rld))
+select = order(rv, decreasing = TRUE)[1:nBest]
+
+rld_top <- rld[select,]
+
+## Perform PCA analysis and make plot
+gg_PCA_topvariable_genes <- plotPCA(rld_top, intgroup = params$design, ntop = nrow(rld_top)) + 
+  theme(legend.position = "bottom") +
+  guides(color = guide_legend(ncol = 3))
+ggsave(gg_PCA_topvariable_genes, file = normalizePath(file.path(paths$DEG_output, "plots", "PCA_top_variable_genes.pdf")))
+
+## Get percent of variance explained
+data_pcaTop <- plotPCA(rld_top, intgroup = params$design, returnData = TRUE, ntop = nrow(rld_top))
+percentVarTop <- round(100 * attr(data_pcaTop, "percentVar"))
+print(paste("PCA 1 =", percentVarTop[1]))
+print(paste("PCA 2 =", percentVarTop[2]))
+```
+
+```{r 'PCA_top_image', fig.width=10, fig.height=8, out.width='100%', out.height='100%', eval=rlogTransformPossible}
+#knitr::include_graphics(path = normalizePath(file.path(paths$DEG_output, "plots", "PCA_top_variable_genes.pdf")), error = FALSE, rel_path = FALSE, out.width='100%', out.height='100%')
+gg_PCA_topvariable_genes
+```
+
+
+This plot shows the principal components analysis limited to all DEGs. Please view the figure axes, if possible, to see how much variance can be explained by each PC variable.
+
+# Sample-to-sample distances {.tabset .tabset-fade}
+
+## All `r nrow(assay(rld))` genes, before filtering
+
+```{r 'sampleDist', fig.width = 10, fig.height = 10, eval=rlogTransformPossible}
+## Obtain the sample euclidean distances
+sampleDists <- stats::dist(t(assay(rld)))
+sampleDists <- dendextend::sort_dist_mat(sampleDists)
+sampleDistMatrix <- as.matrix(sampleDists)
+
+## Add names based on intgroup
+# rownames(sampleDistMatrix) <- apply(as.data.frame(colData(rld)[, "original_names"]), 1,
+#      paste, collapse = ' : ')
+# colnames(sampleDistMatrix) <- apply(as.data.frame(colData(rld)[, "original_names"]), 1,
+#      paste, collapse = ' : ')
+
+distances_df <- as.data.frame(colData(rld)[, intgroup, drop = F])
+# apply(as.data.frame(colData(rld)[, params$design]), 1, paste, collapse = ' : ')
+
+## Define colors to use for the heatmap
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+
+## Make the heatmap
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows = sampleDists,
+         clustering_distance_cols = sampleDists,
+         color = colors,
+         annotation_col = distances_df,
+         filename = normalizePath(file.path(paths$DEG_output, "plots", "Heatmap_Euclid_dist_reg_log_trnsfrmd_counts_all_genes.pdf")))
+```
+
+```{r 'sampleDist_image', fig.width=10, fig.height=8, out.width='100%', out.height='100%', eval = rlogTransformPossible}
+#knitr::include_graphics(path = normalizePath(file.path(paths$DEG_output, "plots", "Heatmap_Euclid_dist_reg_log_trnsfrmd_counts_all_genes.pdf")), error = FALSE, rel_path = FALSE, out.width='100%', out.height='100%')
+## Make the heatmap
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows = sampleDists,
+         clustering_distance_cols = sampleDists,
+         color = colors,
+         annotation_col = distances_df)
+```
+
+This plot shows how samples are clustered based on their euclidean distance using the regularized log transformed count data. This figure gives an overview of how the samples are hierarchically clustered. It is a complementary figure to the PCA plot.
+
+## DEGs only (`r length(unique(significantResults[[biomart_filter]]))` genes)
+
+```{r 'sampleDist_degs', eval = rlogTransformPossible & anyDEGs}
+## Limit to the top n genes
+# rv = rowVars(assay(rld))
+# select = order(rv, decreasing = TRUE)[1:nBest]
+## Obtain the sample euclidean distances
+# sampleDistsTop <- dist(t(assay(rld)[select,]))
+sampleDistsDEGs <- stats::dist(t(assay(rld_degs)))
+sampleDistsDEGs <- dendextend::sort_dist_mat(sampleDistsDEGs)
+# sampleDistMatrixTop <- as.matrix(sampleDistsTop)
+sampleDistMatrixDEGs <- as.matrix(sampleDistsDEGs)
+
+## Add names based on intgroup
+# rownames(sampleDistMatrixDEGs) <- apply(as.data.frame(colData(rld)[, "original_names"]), 1,
+#     paste, collapse = ' : ')
+# colnames(sampleDistMatrixDEGs) <- apply(as.data.frame(colData(rld)[, "original_names"]), 1,
+#     paste, collapse = ' : ')
+
+distances_df <- as.data.frame(colData(rld)[, intgroup, drop = F])
+# apply(as.data.frame(colData(rld)[, params$design]), 1, paste, collapse = ' : ')
+
+## Define colors to use for the heatmap
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+
+## Make the heatmap
+pheatmap(sampleDistMatrixDEGs,
+         clustering_distance_rows = sampleDists,
+         clustering_distance_cols = sampleDists,
+         color = colors,
+         annotation_col = distances_df,
+         filename = normalizePath(file.path(paths$DEG_output, "plots", "Heatmap_Euclid_dist_reg_log_trnsfrmd_counts_sig_genes.pdf")))
+```
+
+```{r 'sampleDist_degs_image', fig.width=10, fig.height=8, out.width='100%', out.height='100%', eval = rlogTransformPossible & anyDEGs}
+#knitr::include_graphics(path = normalizePath(file.path(paths$DEG_output, "plots", "Heatmap_Euclid_dist_reg_log_trnsfrmd_counts_sig_genes.pdf")), error = FALSE, rel_path = FALSE, out.width='100%', out.height='100%')
+pheatmap(sampleDistMatrixDEGs,
+         clustering_distance_rows = sampleDists,
+         clustering_distance_cols = sampleDists,
+         color = colors,
+         annotation_col = distances_df)
+```
+
+This plot shows how samples are clustered based on their euclidean distance using the regularized log transformed count data of all DEGs. This figure gives an overview of how the samples are hierarchically clustered. It is a complementary figure to the PCA plot.
+
+## Most `r nBest` variable genes only
+
+```{r 'sampleDist_top', fig.width = 10, fig.height = 10, eval = rlogTransformPossible}
+## Limit to the top n genes
+## Using the select object from PCA code above...
+## Obtain the sample euclidean distances
+sampleDistsTop <- stats::dist(t(assay(rld)[select,]))
+sampleDistsTop <- dendextend::sort_dist_mat(sampleDistsTop)
+sampleDistMatrixTop <- as.matrix(sampleDistsTop)
+
+## Add names based on intgroup
+# rownames(sampleDistMatrixTop) <- apply(as.data.frame(colData(rld)[, "original_names"]), 1,
+#     paste, collapse = ' : ')
+# colnames(sampleDistMatrixTop) <- apply(as.data.frame(colData(rld)[, "original_names"]), 1,
+#     paste, collapse = ' : ')
+
+distances_df <- as.data.frame(colData(rld)[, intgroup, drop = F])
+# apply(as.data.frame(colData(rld)[, params$design]), 1, paste, collapse = ' : ')
+
+## Define colors to use for the heatmap
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+
+## Make the heatmap
+pheatmap(sampleDistMatrixTop,
+         clustering_distance_rows = sampleDists,
+         clustering_distance_cols = sampleDists,
+         color = colors,
+         annotation_col = distances_df,
+         filename = normalizePath(file.path(paths$DEG_output, "plots", "Heatmap_Euclid_dist_reg_log_trnsfrmd_counts_top_variable_genes.pdf")))
+```
+
+```{r 'sampleDist_top_image', fig.width=10, fig.height=8, out.width='100%', out.height='100%', eval = rlogTransformPossible}
+#knitr::include_graphics(path = normalizePath(file.path(paths$DEG_output, "plots", "Heatmap_Euclid_dist_reg_log_trnsfrmd_counts_top_variable_genes.pdf")), error = FALSE, rel_path = FALSE, out.width='100%', out.height='100%')
+pheatmap(sampleDistMatrixTop,
+         clustering_distance_rows = sampleDists,
+         clustering_distance_cols = sampleDists,
+         color = colors,
+         annotation_col = distances_df)
+```
+
+This plot shows how samples are clustered based on their euclidean distance using the regularized log transformed count data of the top `r nBest` most variable genes. This figure gives an overview of how the samples are hierarchically clustered. It is a complementary figure to the PCA plot.
+
+# Heatmaps {.tabset .tabset-fade}
+
+## All `r length(unique(significantResults[[biomart_filter]]))` DEGs
+
+```{r 'heatmap_all_DEGs', collapse = TRUE, eval = rlogTransformPossible & anyDEGs}
+
+if (Platform == "RNA-Seq") {
+  if (species == "fatheadminnow") {
+    	mat <- assay(rld)[row.names(assay(rld)) %in%
+                                          significantResults[[species_gene_symbol]],]
+  } else {
+    	mat <- assay(rld)[row.names(assay(rld)) %in%
+                                          significantResults[[biomart_filter]],]
+  }
+} else if (Platform == "TempO-Seq") {
+	mat <- assay(rld)[row.names(assay(rld)) %in%
+                                          significantResults[["PROBE"]],]
+}
+
+mat <- mat - rowMeans(mat)
+
+heatmap_df <- as.data.frame(colData(rld)[, intgroup, drop = F])
+row.names(heatmap_df) <- colData(rld)$original_names # Customize!
+pheatmap(mat,
+         annotation_col = heatmap_df,
+         show_rownames = FALSE,
+         border_color = NA,
+         scale = "row",
+         filename = normalizePath(file.path(paths$DEG_output, "plots", "Heatmap_norm_counts_vs._logFC_sig_genes.pdf")))
+```
+
+```{r 'heatmap_all_DEGs_image', fig.width=10, fig.height=8, out.width='100%', out.height='100%', eval = rlogTransformPossible & anyDEGs}
+#knitr::include_graphics(path = normalizePath(file.path(paths$DEG_output, "plots", "Heatmap_norm_counts_vs._logFC_sig_genes.pdf")), error = FALSE, rel_path = FALSE, out.width='100%', out.height='100%')
+# color = inferno(10)
+pheatmap(mat,
+         annotation_col = heatmap_df,
+         show_rownames = FALSE,
+         border_color = NA,
+         scale = "row")
+```
+
+## Top `r nHeatmapDEGs` differentially abundant genes
+
+```{r 'heatmap_top_degs', collapse = TRUE, eval = rlogTransformPossible & anyDEGs}
+
+if (Platform == "RNA-Seq") {
+  if (species == "fatheadminnow") {
+    mat_top <- assay(rld)[row.names(assay(rld)) %in% allResultsOrdered_logFC_filter[1:nHeatmapDEGs,][[species_gene_symbol]],]
+	  mat_top <- mat_top - rowMeans(mat_top)
+	  genes_for_heatmap <- data.frame(genes = row.names(mat_top))
+	  names(genes_for_heatmap)[names(genes_for_heatmap) == "genes"] <- species_gene_symbol
+	  genes_for_heatmap <- dplyr::left_join(genes_for_heatmap,
+                                      id_table,
+                                      by = species_gene_symbol) %>%
+  		dplyr::select(!!ensym(biomart_filter), !!ensym(species_gene_symbol)) %>%
+  		dplyr::distinct() %>%
+  		dplyr::group_by(!!ensym(biomart_filter)) %>%
+  		dplyr::mutate(combined = paste0(!!ensym(species_gene_symbol), collapse = ", ")) %>%
+  		dplyr::select(-!!ensym(species_gene_symbol)) %>%
+  		dplyr::distinct()
+	  names(genes_for_heatmap)[names(genes_for_heatmap) == "combined"] <- species_gene_symbol
+	  genes_for_heatmap[[species_gene_symbol]] <- ifelse(is.na(genes_for_heatmap[[species_gene_symbol]]),
+               genes_for_heatmap[[biomart_filter]],
+               genes_for_heatmap[[species_gene_symbol]])
+
+	  genes_for_heatmap[[species_gene_symbol]] <- ifelse(genes_for_heatmap[[species_gene_symbol]] == "",
+               genes_for_heatmap[[biomart_filter]],
+               genes_for_heatmap[[species_gene_symbol]])
+  } else {
+    mat_top <- assay(rld)[row.names(assay(rld)) %in% allResultsOrdered_logFC_filter[1:nHeatmapDEGs,][[biomart_filter]],]
+	  mat_top <- mat_top - rowMeans(mat_top)
+	  genes_for_heatmap <- data.frame(genes = row.names(mat_top))
+	  names(genes_for_heatmap)[names(genes_for_heatmap) == "genes"] <- biomart_filter
+	  genes_for_heatmap <- dplyr::left_join(genes_for_heatmap,
+                                      id_table_entrez,
+                                      by = biomart_filter) %>%
+  		dplyr::select(!!ensym(biomart_filter), !!ensym(species_gene_symbol)) %>%
+  		dplyr::distinct() %>%
+  		dplyr::group_by(!!ensym(biomart_filter)) %>%
+  		dplyr::mutate(combined = paste0(!!ensym(species_gene_symbol), collapse = ", ")) %>%
+  		dplyr::select(-!!ensym(species_gene_symbol)) %>%
+  		dplyr::distinct()
+	  names(genes_for_heatmap)[names(genes_for_heatmap) == "combined"] <- species_gene_symbol
+	  genes_for_heatmap[[species_gene_symbol]] <- ifelse(is.na(genes_for_heatmap[[species_gene_symbol]]),
+               genes_for_heatmap[[biomart_filter]],
+               genes_for_heatmap[[species_gene_symbol]])
+
+	  genes_for_heatmap[[species_gene_symbol]] <- ifelse(genes_for_heatmap[[species_gene_symbol]] == "",
+               genes_for_heatmap[[biomart_filter]],
+               genes_for_heatmap[[species_gene_symbol]])
+  }
+} else if (Platform == "TempO-Seq") {
+	mat_top <- assay(rld)[row.names(assay(rld)) %in% allResultsOrdered_logFC_filter[1:nHeatmapDEGs,][["PROBE"]],]
+	mat_top <- mat_top - rowMeans(mat_top)
+	genes_for_heatmap <- data.frame(genes = row.names(mat_top))
+	names(genes_for_heatmap)[names(genes_for_heatmap) == "genes"] <- "PROBE"
+	genes_for_heatmap <- dplyr::left_join(genes_for_heatmap,
+                                      id_table_entrez,
+                                      by = "PROBE") %>%
+  		dplyr::select(!!ensym(biomart_filter), !!ensym(species_gene_symbol), PROBE) %>%
+  		dplyr::distinct() %>%
+  		dplyr::group_by(PROBE) %>%
+  		dplyr::mutate(combined = paste0(!!ensym(species_gene_symbol), collapse = ", ")) %>%
+  		dplyr::select(-!!ensym(species_gene_symbol)) %>%
+  		dplyr::distinct()
+	names(genes_for_heatmap)[names(genes_for_heatmap) == "combined"] <- species_gene_symbol
+	genes_for_heatmap[[species_gene_symbol]] <- ifelse(is.na(genes_for_heatmap[[species_gene_symbol]]),
+               genes_for_heatmap[["PROBE"]],
+               genes_for_heatmap[[species_gene_symbol]])
+
+	genes_for_heatmap[[species_gene_symbol]] <- ifelse(genes_for_heatmap[[species_gene_symbol]] == "",
+               genes_for_heatmap[["PROBE"]],
+               genes_for_heatmap[[species_gene_symbol]])
+}
+
+genes_for_heatmap <- genes_for_heatmap %>% pull(species_gene_symbol)
+
+pheatmap(mat_top,
+         annotation_col = heatmap_df,
+         labels_row = genes_for_heatmap,
+         show_rownames = TRUE,
+         border_color = NA,
+         scale = "row",
+         filename = normalizePath(file.path(paths$DEG_output, "plots", "Heatmap_norm_counts_vs._logFC_top_genes_byFC.pdf")))
+color = inferno(10)
+```
+
+```{r 'heatmap_top_degs_image', fig.width=10, fig.height=8, out.width='100%', out.height='100%', eval = rlogTransformPossible & anyDEGs}
+#knitr::include_graphics(path = normalizePath(file.path(paths$DEG_output, "plots", "Heatmap_norm_counts_vs._logFC_top_genes_byFC.pdf")), error = FALSE, rel_path = FALSE, out.width='100%', out.height='100%')
+pheatmap(mat_top,
+         annotation_col = heatmap_df,
+         labels_row = genes_for_heatmap,
+         show_rownames = TRUE,
+         border_color = NA,
+         scale = "row")
+color = inferno(10)
+```
+
+## Top `r nHeatmap` variable genes
+
+```{r 'heatmap_top_n_genes', fig.height = 10, fig.width = 10, collapse = TRUE, eval = rlogTransformPossible}
+heatmap_df <- as.data.frame(colData(rld)[, intgroup, drop = F])
+
+rv = rowVars(assay(rld))
+select = order(rv, decreasing = TRUE)[1:nHeatmap]
+matRV <- assay(rld)[select,]
+matRV <- matRV - rowMeans(matRV)
+
+genes_for_heatmap <- data.frame(genes = row.names(matRV))
+
+if (Platform == "RNA-Seq") {
+  if (species == "fatheadminnow") {
+    names(genes_for_heatmap)[names(genes_for_heatmap) == "genes"] <- species_gene_symbol
+	  genes_for_heatmap <- dplyr::left_join(genes_for_heatmap,
+                                      id_table,
+                                      by = species_gene_symbol) %>%
+  		dplyr::select(!!ensym(biomart_filter), !!ensym(species_gene_symbol)) %>%
+  		dplyr::distinct() %>%
+  		dplyr::group_by(!!ensym(biomart_filter)) %>%
+  		dplyr::mutate(combined = paste0(!!ensym(species_gene_symbol), collapse = ", ")) %>%
+  		dplyr::select(-!!ensym(species_gene_symbol)) %>%
+  		dplyr::distinct()
+	  names(genes_for_heatmap)[names(genes_for_heatmap) == "combined"] <- species_gene_symbol
+	  genes_for_heatmap[[species_gene_symbol]] <- ifelse(genes_for_heatmap[[species_gene_symbol]] == "NA",
+               genes_for_heatmap[[biomart_filter]],
+               genes_for_heatmap[[species_gene_symbol]])
+	  genes_for_heatmap[[species_gene_symbol]] <- ifelse(genes_for_heatmap[[species_gene_symbol]] == "",
+               genes_for_heatmap[[biomart_filter]],
+               genes_for_heatmap[[species_gene_symbol]])
+  } else {
+    names(genes_for_heatmap)[names(genes_for_heatmap) == "genes"] <- biomart_filter
+	  genes_for_heatmap <- dplyr::left_join(genes_for_heatmap,
+                                      id_table_entrez,
+                                      by = biomart_filter) %>%
+  		dplyr::select(!!ensym(biomart_filter), !!ensym(species_gene_symbol)) %>%
+  		dplyr::distinct() %>%
+  		dplyr::group_by(!!ensym(biomart_filter)) %>%
+  		dplyr::mutate(combined = paste0(!!ensym(species_gene_symbol), collapse = ", ")) %>%
+  		dplyr::select(-!!ensym(species_gene_symbol)) %>%
+  		dplyr::distinct()
+	  names(genes_for_heatmap)[names(genes_for_heatmap) == "combined"] <- species_gene_symbol
+	  genes_for_heatmap[[species_gene_symbol]] <- ifelse(genes_for_heatmap[[species_gene_symbol]] == "NA",
+               genes_for_heatmap[[biomart_filter]],
+               genes_for_heatmap[[species_gene_symbol]])
+	  genes_for_heatmap[[species_gene_symbol]] <- ifelse(genes_for_heatmap[[species_gene_symbol]] == "",
+               genes_for_heatmap[[biomart_filter]],
+               genes_for_heatmap[[species_gene_symbol]])
+  }
+} else if (Platform == "TempO-Seq") {
+	names(genes_for_heatmap)[names(genes_for_heatmap) == "genes"] <- "PROBE"
+	genes_for_heatmap <- dplyr::left_join(genes_for_heatmap,
+                                      id_table_entrez,
+                                      by = "PROBE") %>%
+  		dplyr::select(!!ensym(biomart_filter), !!ensym(species_gene_symbol), PROBE) %>%
+  		dplyr::distinct() %>%
+  		dplyr::group_by(PROBE) %>%
+  		dplyr::mutate(combined = paste0(!!ensym(species_gene_symbol), collapse = ", ")) %>%
+  		dplyr::select(-!!ensym(species_gene_symbol)) %>%
+  		dplyr::distinct()
+	names(genes_for_heatmap)[names(genes_for_heatmap) == "combined"] <- species_gene_symbol
+	genes_for_heatmap[[species_gene_symbol]] <- ifelse(genes_for_heatmap[[species_gene_symbol]] == "NA",
+               if_else(is.na(genes_for_heatmap[[biomart_filter]]), gsub("_.*", "", genes_for_heatmap[["PROBE"]]), genes_for_heatmap[[biomart_filter]]),
+               genes_for_heatmap[[species_gene_symbol]])
+	genes_for_heatmap[[species_gene_symbol]] <- ifelse(genes_for_heatmap[[species_gene_symbol]] == "",
+               if_else(is.na(genes_for_heatmap[[biomart_filter]]), gsub("_.*", "", genes_for_heatmap[["PROBE"]]), genes_for_heatmap[[biomart_filter]]),
+               genes_for_heatmap[[species_gene_symbol]])
+}
+
+genes_for_heatmap <- genes_for_heatmap %>% pull(species_gene_symbol)
+
+pheatmap(matRV,
+         #color = rev(brewer.pal(11, "RdBu")), # inferno(10),
+         annotation_col = heatmap_df,
+         labels_row = genes_for_heatmap,
+         border_color = NA,
+         scale = "row",
+         cutree_rows = 3,
+         cutree_cols = 4,
+         filename = normalizePath(file.path(paths$DEG_output, "plots", "Heatmap_norm_counts_vs._logFC_top_variable_genes.pdf")))
+```
+
+```{r 'heatmap_top_n_genes_image', fig.width=10, fig.height=8, out.width='100%', out.height='100%', eval = rlogTransformPossible}
+#knitr::include_graphics(path = normalizePath(file.path(paths$DEG_output, "plots", "Heatmap_norm_counts_vs._logFC_top_variable_genes.pdf")), error = FALSE, rel_path = FALSE, out.width='100%', out.height='100%')
+pheatmap(matRV,
+         #color = rev(brewer.pal(11, "RdBu")), # inferno(10),
+         annotation_col = heatmap_df,
+         labels_row = genes_for_heatmap,
+         border_color = NA,
+         scale = "row",
+         cutree_rows = 3,
+         cutree_cols = 4)
+```
+
+# MA plots
+
+This section contains three groups of MA plots (see [Wikipedia](https://en.wikipedia.org/wiki/MA_plot)) that compare the mean of the normalized counts against the log fold change. Each of the groups has a tab for each contrast. The plots show one point per feature. The points are shown in red if the feature has an adjusted p-value less than the cutoff listed in each section, that is, the statistically significant features are shown in red.
+
+## Filtered at `r alpha` {.tabset .tabset-fade}
+
+This group of plots shows `alpha` = `r alpha`, which is the `alpha` value used to determine which resulting features were significant when running the function `DESeq2::results()`.  
+
+```{r fc_range, warning = FALSE, eval = rlogTransformPossible & anyDEGs}
+# Find IQR for absolute values of all significant log2foldchanges
+# Plot MA plots
+foldchangestats <- boxplot(abs(significantResults$log2FoldChange), plot = F)
+ylims_for_ma_plots <- c(-foldchangestats$stats[4, 1], foldchangestats$stats[4, 1])
+```
+
+```{r MAplotalpha, echo=FALSE, message=FALSE, warning=FALSE, fig.width=10, fig.height=8, eval = rlogTransformPossible & anyDEGs}
+## MA plot with alpha used in DESeq2::results()
+
+for (i in seq_along(resListAll)) {
+  contrast = gsub(pattern = paste0("log2.*", DESIGN, "\ "),
+                  replacement =  "",
+                  x = resListAll[[i]]@elementMetadata[[2]][2])
+  MA_title <- paste0('MA plot, alpha = ', alpha,', ', contrast)
+  gg_MA <- DESeq2::plotMA(resListAll[[i]],
+                 alpha = alpha,
+                 main = str_wrap(MA_title, width = 40),
+                 ylim = ylims_for_ma_plots,
+                 returnData = TRUE)
+  gg_MA <- ggplot(data = gg_MA, aes(x = mean, y = lfc, color = isDE)) +
+    geom_point() +
+    scale_x_log10() +
+    scale_color_manual(values = c("TRUE" = "red", "FALSE" = "black")) +
+    theme_bw() +
+    xlab("Mean of normalized counts") +
+    ylab("Log fold change") +
+    theme(legend.position =  "none") +
+    ggtitle(MA_title)
+  pdf_filename <- normalizePath(file.path(paths$DEG_output, "plots", paste0("MA_plot_", contrast, ".pdf")))
+  ggsave(gg_MA, file = pdf_filename)
+
+  # Print confirmation
+  print(paste0("Saved MA plot to: ", pdf_filename))
+}
+```
+
+
+```{r MAplotalpha_images, results='asis', fig.width=10, fig.height=8, out.width='100%', out.height='100%', echo=FALSE, message=FALSE, warning=FALSE, eval = rlogTransformPossible & anyDEGs}
+for (i in seq_along(resListAll)) {
+  contrast = gsub(pattern = paste0("log2.*", DESIGN, "\ "),
+                  replacement =  "",
+                  x = resListAll[[i]]@elementMetadata[[2]][2])
+  cat("### ", contrast, "\n\n")
+  MA_title <- paste0('MA plot, alpha = ', alpha,', ', contrast)
+  gg_MA <- DESeq2::plotMA(resListAll[[i]],
+                 alpha = alpha,
+                 main = str_wrap(MA_title, width = 40),
+                 ylim = ylims_for_ma_plots,
+                 returnData = TRUE)
+  gg_MA <- ggplot(data = gg_MA, aes(x = mean, y = lfc, color = isDE)) +
+    geom_point() +
+    scale_x_log10() +
+    scale_color_manual(values = c("TRUE" = "red", "FALSE" = "black")) +
+    theme_bw() +
+    xlab("Mean of normalized counts") +
+    ylab("Log fold change") +
+    theme(legend.position =  "none") +
+    ggtitle(MA_title)
+
+  # Render plots
+  #knitr::include_graphics(path = pdf_filename, error = FALSE, rel_path = FALSE, out.width='100%', out.height='100%')
+  print(gg_MA)
+  cat("\n\n")
+}
+```
+
+## {-}
+
+# P-values {.tabset .tabset-fade}
+
+## Distribution of all p-values
+
+```{r pvalueHistogram, collapse = TRUE, eval = rlogTransformPossible}
+## P-value histogram plot
+
+gg_p_value_hist <- ggplot(allResults, aes(x = pvalue)) +
+    geom_histogram(alpha = .5, position = 'identity', bins = 50) +
+    labs(title = 'Histogram of unadjusted p-values') +
+    xlab('Unadjusted p-values') +
+    facet_wrap( ~ contrast, ncol = 2)
+ggsave(gg_p_value_hist, file = normalizePath(file.path(paths$DEG_output, "plots", "Histogram_p_values.pdf")))
+```
+
+```{r pvalueHistogram_image, collapse = TRUE, fig.width=10, fig.height=8, out.width='100%', out.height='100%', eval = rlogTransformPossible}
+#knitr::include_graphics(path = normalizePath(file.path(paths$DEG_output, "plots", "Histogram_p_values.pdf")), error = FALSE, rel_path = FALSE, out.width='100%', out.height='100%')
+gg_p_value_hist
+```
+
+This plot shows a histogram of the unadjusted p-values. It might be skewed right or left, or flat as shown in the [Wikipedia examples](https://en.wikipedia.org/wiki/Histogram#Examples). The shape depends on the percent of features that are differentially expressed. For further information on how to interpret a histogram of p-values check [David Robinson's post on this topic](http://varianceexplained.org/statistics/interpreting-pvalue-histogram/).
+
+```{r pvalueSumm, eval = rlogTransformPossible}
+## P-value distribution summary
+summary(allResults$pvalue)
+#boxplot(allResults$pvalue)
+```
+
+This is the numerical summary of the distribution of the p-values.
+
+```{r pvalueTable, results = 'asis', eval = rlogTransformPossible}
+## Split features by different p-value cutoffs
+pval_table <- lapply(c(1e-04, 0.001, 0.01, 0.025, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5,
+    0.6, 0.7, 0.8, 0.9, 1), function(x) {
+    data.frame('Cut' = x, 'Count' = sum(allResults$pvalue <= x, na.rm = TRUE))
+})
+pval_table <- do.call(rbind, pval_table)
+kable(pval_table, format = 'markdown', align = c('c', 'c'))
+```
+
+This table shows the number of features with p-values less or equal than some commonly used cutoff values. 
+
+## Distribution of adjusted p-values
+
+```{r padjHistogram, fig.width=10, fig.height=8, eval = rlogTransformPossible}
+## Adjusted p-values histogram plot
+gg_adj_p_value_hist <- ggplot(allResults, aes(x = padj)) +
+  geom_histogram(alpha = 0.5, position = 'identity', bins = 50) +
+  labs(title = paste('Histogram of', elementMetadata(resList[[1]])$description[grep('adjusted', elementMetadata(resList[[1]])$description)])) +
+  xlab('Adjusted p-values') +
+  facet_wrap( ~ contrast, ncol = 2)
+ggsave(gg_adj_p_value_hist, file = normalizePath(file.path(paths$DEG_output, "plots", "Histogram_adj_p_values.pdf")))
+```
+
+```{r padjHistogram_image, fig.width=10, fig.height=8, out.width='100%', out.height='100%', eval = rlogTransformPossible}
+#knitr::include_graphics(path = normalizePath(file.path(paths$DEG_output, "plots", "Histogram_adj_p_values.pdf")), error = FALSE, rel_path = FALSE, out.width='100%', out.height='100%')
+gg_adj_p_value_hist
+```
+
+This plot shows a histogram of the `r elementMetadata(resList[[1]])$description[grep('adjusted', elementMetadata(resList[[1]])$description)]`. It might be skewed right or left, or flat as shown in the [Wikipedia examples](https://en.wikipedia.org/wiki/Histogram#Examples). 
+
+```{r padjSumm, eval = rlogTransformPossible}
+## Adjusted p-values distribution summary
+summary(res.df$padj)
+```
+
+This is the numerical summary of the distribution of the `r elementMetadata(resList[[1]])$description[grep('adjusted', elementMetadata(resList[[1]])$description)]`.
+
+```{r padjTable, results = 'asis', eval = rlogTransformPossible}
+## Split features by different adjusted p-value cutoffs
+padj_table <- lapply(c(1e-04, 0.001, 0.01, 0.025, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5,
+    0.6, 0.7, 0.8, 0.9, 1), function(x) {
+    data.frame('Cut' = x, 'Count' = sum(res.df$padj <= x, na.rm = TRUE))
+})
+padj_table <- do.call(rbind, padj_table)
+kable(padj_table, format = 'markdown', align = c('c', 'c'))
+```
+
+This table shows the number of features with `r elementMetadata(resList[[1]])$description[grep('adjusted', elementMetadata(resList[[1]])$description)]` less or equal than some commonly used cutoff values. 
+
+# Tables of top features
+
+This table shows the significant DEGs (passing all filtering criteria) ordered by their absolute fold change. Use the search function to find your feature of interest or sort by one of the columns. You can limit to a single contrast if desired.
+
+```{r 'topFeatures', results = 'asis', warning = FALSE, eval = rlogTransformPossible & anyDEGs}
+
+#### THIS SECTION NEEDS TO BE UPDATED FOR FATHEAD MINNNOW
+
+searchURL <- "http://www.ncbi.nlm.nih.gov/gene/?term="
+## Add search url if appropriate
+res.df.dt <- res.df
+if (!is.null(searchURL)) {
+    res.df.dt[[biomart_filter]] <- paste0('<a href="',
+                             searchURL,
+                             res.df.dt[[biomart_filter]],
+                             '" rel="noopener noreferrer" target="_blank">',
+                             res.df.dt[[biomart_filter]],
+                             '<br/>',
+                             res.df.dt[[species_gene_symbol]],
+                             '</a>')
+}
+
+res.df.dt[, 'padj'] <- format(res.df.dt[, 'padj'], scientific = TRUE, digits = digits)
+res.df.dt[, 'pvalue'] <- format(res.df.dt[, 'pvalue'], scientific = TRUE, digits = digits)
+res.df.dt <- res.df.dt %>% dplyr::select(-c(description, !!ensym(species_gene_symbol)))
+
+DT::datatable(res.df.dt,
+          options = list(pagingType = 'full_numbers',
+                         pageLength = 20,
+                         scrollX = '100%',
+                         dom = 'Bfrtip',
+                         buttons = c('copy',
+                                     'csv',
+                                     'excel',
+                                     'pdf',
+                                     'print',
+                                     'colvis'),
+                         columnDefs = list(list(visible = FALSE, targets = c(2, 4, 5)))),
+          escape = FALSE,
+          extensions = 'Buttons',
+          rownames = FALSE,
+          filter = "top",
+          colnames = c('Gene' = biomart_filter)) %>% 
+  DT::formatRound(which(!colnames(res.df.dt) %in% c('pvalue',
+                                                    'padj',
+                                                    'Feature',
+                                                    'contrast',
+                                                    'description',
+                                                    biomart_filter,
+                                                    species_gene_symbol)),
+                  digits)
+
+```
+
+# Gene-level plots for top `r nBestFeatures` features
+
+This section contains plots showing the normalized counts per sample for each group of interest. Only the best `r nBestFeatures` features are shown, ranked by their absolute fold change values. The Y axis is on the log10 scale and the feature name is shown in the title of each plot.
+
+## Plot Generation {.tabset .tabset-fade}
+
+```{r plotCounts, echo=FALSE, warning=FALSE, message=FALSE, fig.width=10, fig.height=8, eval = rlogTransformPossible & anyDEGs}
+# Would be valuable to have this broken down by contrast too.
+
+if (Platform == "TempO-Seq") {
+	id_table <- id_table %>%
+  		mutate(!!sym(biomart_filter) := if_else(is.na(!!sym(biomart_filter)) & is.na(!!sym(species_gene_symbol)), PROBE, !!sym(biomart_filter)))
+}
+
+plotCounts_gg <- function(i, dds, intgroup) {
+    plotdata <- plotCounts(dds,
+                       gene = i,
+                       intgroup = intgroup,
+                       returnData = TRUE)
+    plot_title <- paste(id_table[[biomart_filter]][id_table[[biomart_filter]] == i],
+                        id_table[[species_gene_symbol]][id_table[[biomart_filter]] == i])
+    if (ncol(plotdata) > 2) {
+      colorCol = 3
+    } else {colorCol = 2}
+    ggplot(plotdata, aes(x = plotdata[, 2], y = plotdata[, 1], color = plotdata[, colorCol])) + 
+      geom_point(position = position_jitterdodge()) +
+      ylab('Normalized count') +
+      xlab('Group') +
+      ggtitle(plot_title) +
+      coord_trans(y = "log10") +
+      theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+      labs(color = colnames(plotdata)[colorCol])
+}
+
+genesToPlot <- significantResults %>% arrange(-abs(log2FoldChange))
+
+if (Platform == "RNA-Seq") {
+  if (species == "fatheadminnow") {
+    for (i in head(unique(genesToPlot[[species_gene_symbol]]), nBestFeatures)) {
+      gg_plot_counts <-
+        plotCounts_gg(i, dds = dds, intgroup = params$design)
+      filename <-
+        normalizePath(file.path(
+          paths$DEG_output,
+          "plots",
+          paste0("Count_plot_", id_table[[biomart_filter]][id_table[[species_gene_symbol]] == i], "_", id_table[[species_gene_symbol]][id_table[[species_gene_symbol]] == i][1], ".pdf")
+        ))
+      ggsave(gg_plot_counts, file = filename)
+      #knitr::include_graphics(path = filename, error = FALSE, rel_path = FALSE)
+    }
+  } else {
+    for (i in head(unique(genesToPlot[[biomart_filter]]), nBestFeatures)) {
+      gg_plot_counts <-
+        plotCounts_gg(i, dds = dds, intgroup = params$design)
+      filename <-
+        normalizePath(file.path(
+          paths$DEG_output,
+          "plots",
+          paste0("Count_plot_", id_table[[biomart_filter]][id_table[[biomart_filter]] == i], "_", id_table[[species_gene_symbol]][id_table[[biomart_filter]] == i][1], ".pdf")
+        ))
+      ggsave(gg_plot_counts, file = filename)
+      #knitr::include_graphics(path = filename, error = FALSE, rel_path = FALSE)
+    }
+  }
+} else if (Platform == "TempO-Seq") {
+  for (i in head(unique(genesToPlot[["PROBE"]]), nBestFeatures)) {
+    gg_plot_counts <-
+      plotCounts_gg(i, dds = dds, intgroup = params$design)
+    filename <-
+      normalizePath(file.path(
+        paths$DEG_output,
+        "plots",
+        paste0("Count_plot_", id_table[[biomart_filter]][id_table[["PROBE"]] == i], "_", id_table[["PROBE"]][id_table[["PROBE"]] == i][1], ".pdf")
+      ))
+    ggsave(gg_plot_counts, file = filename)
+    #knitr::include_graphics(path = filename, error = FALSE, rel_path = FALSE)
+  }
+}
+
+
+```
+
+```{r plotCounts_images, results='asis', echo=FALSE, fig.width=10, fig.height=8, out.width='100%', out.height='100%', eval = rlogTransformPossible & anyDEGs}
+if (Platform == "RNA-Seq") {
+  if (species == "fatheadminnow") {
+    for (i in head(unique(genesToPlot[[species_gene_symbol]]), nBestFeatures)) {
+      gg_plot_counts <- plotCounts_gg(i, dds = dds, intgroup = params$design)
+      gene_name <- paste0(id_table[[biomart_filter]][id_table[[species_gene_symbol]] == i], "_", id_table[[species_gene_symbol]][id_table[[species_gene_symbol]] == i][1])
+      
+      # Create tab for each plot
+      cat("### ", gene_name, "\n\n")
+      print(gg_plot_counts)
+      cat("\n\n")
+    }
+  } else {
+    for (i in head(unique(genesToPlot[[biomart_filter]]), nBestFeatures)) {
+      gg_plot_counts <- plotCounts_gg(i, dds = dds, intgroup = params$design)
+      gene_name <- paste0(id_table[[biomart_filter]][id_table[[biomart_filter]] == i], "_", id_table[[species_gene_symbol]][id_table[[biomart_filter]] == i][1])
+      
+      # Create tab for each plot
+      cat("### ", gene_name, "\n\n")
+      print(gg_plot_counts)
+      cat("\n\n")
+    }
+  }
+} else if (Platform == "TempO-Seq") {
+  for (i in head(unique(genesToPlot[["PROBE"]]), nBestFeatures)) {
+    gg_plot_counts <- plotCounts_gg(i, dds = dds, intgroup = params$design)
+    gene_name <- paste0(id_table[[biomart_filter]][id_table[["PROBE"]] == i], "_", id_table[["PROBE"]][id_table[["PROBE"]] == i][1])
+    
+    # Create tab for each plot
+    cat("### ", gene_name, "\n\n")
+    print(gg_plot_counts)
+    cat("\n\n")
+  }
+}
+```
+
+## {-}
+
+# Plots of genes of interest
+
+This section shows genes of interest sorted by those with highest fold-change within each contrast.
+
+```{r 'plot_genes_of_interest', fig.width=10, fig.height=8, eval = rlogTransformPossible & anyDEGs}
+
+#numResults = 20
+numResults <- nBestFeatures
+
+gg_genes_of_interest <- allResultsOrdered_logFC_filter %>%
+  group_by(contrast) %>%
+  top_n(numResults, wt = abs(log2FoldChange)) %>%
+  ungroup() %>%
+  mutate(contrast = as.factor(contrast),
+         symbol = reorder_within(!!ensym(species_gene_symbol), log2FoldChange, contrast)) %>%
+  ggplot(aes(x = log2FoldChange,
+             y = symbol,
+             color = contrast,
+             size = -log(padj))) +
+  geom_point(show.legend = TRUE) +
+  facet_wrap(~contrast,
+             scales = "free_y",
+             ncol = 2,
+             labeller = labeller(contrast = label_wrap_gen(10))) +
+  scale_y_reordered()  +
+  geom_vline(xintercept = 0,
+             linetype = "dashed",
+             color = "black",
+             size = 1) +
+  ggtitle(paste0("Top ",
+                 numResults,
+                 " genes ranked by fold change (adjusted p-value <",
+                 alpha,
+                 "), grouped by treatment"))
+
+ggsave(gg_genes_of_interest, file = normalizePath(file.path(paths$DEG_output, "plots", "Genes_of_interest_by_FC.pdf"))) #scale = 2
+```
+
+```{r 'plot_genes_of_interest_image', fig.width=10, fig.height=8, out.width='100%', out.height='100%', eval = rlogTransformPossible & anyDEGs}
+#knitr::include_graphics(path = normalizePath(file.path(paths$DEG_output, "plots", "Genes_of_interest_by_FC.pdf")), error = FALSE, rel_path = FALSE, out.width='100%', out.height='100%')
+gg_genes_of_interest
+```
+
+# Volcano plot
+
+This section shows a volcano plot for each contrast.  
+
+Note that scales are set manually for this plot: therefore, there may be data points outside the range shown (see warnings).  
+
+Data reported as significant are shown as red points.
+
+```{r 'volcano-plot', warning=TRUE, fig.width=10, fig.height=8, eval = rlogTransformPossible & anyDEGs}
+gg_volcano <- ggplot(allResults, aes(x = log2FoldChange, y = -log10(padj))) +
+  geom_point(size = 0.5, alpha = 0.3) +
+  geom_point(data = significantResults, size = 0.5, alpha = 0.9, color = "red") +
+  facet_wrap(~contrast, ncol = 2) + # , scales = "free"
+  geom_vline(xintercept = c(-log2(1.5), log2(1.5)), color = "red", alpha = 1.0) + 
+  geom_hline(yintercept = -log10(0.05), color = "blue", alpha = 1.0) +
+  scale_x_continuous(name = "log2 Fold Change", limits = c(-5, 5)) + # 
+  scale_y_continuous(name = "-log10 adjusted p-value", limits = c(0, 6)) # 
+ggsave(gg_volcano, file = normalizePath(file.path(paths$DEG_output, "plots", "Volcano_plot.pdf")))
+```
+
+```{r 'volcano-plot_image', fig.width=10, fig.height=8, out.width='100%', out.height='100%', warning = TRUE, eval = rlogTransformPossible & anyDEGs}
+#knitr::include_graphics(path = normalizePath(file.path(paths$DEG_output, "plots", "Volcano_plot.pdf")), error = FALSE, rel_path = FALSE)
+gg_volcano
+```
+
+```{r 'bmdexpress_input', collapse=TRUE}
+
+###########################################################################################
+######## PRODUCE INPUT FOR BMDExpress2 ####################################################
+###########################################################################################
+
+# Run this code conditional on whether there is a column matching the word dose in the metadata
+if (any(grepl(x = colnames(DESeqDesign), pattern = "^dose$", ignore.case = T))) {
+  doseCol <- grep(x = colnames(DESeqDesign), pattern = "^dose$", ignore.case = T)
+
+  # Create input file...
+  read.counts <- as.data.frame(counts(dds, normalized = TRUE))
+  lognorm.read.counts <- log2(read.counts + 1)
+  bmdexpress <- fastbmd <- as.data.frame(lognorm.read.counts)
+  bmdexpress <- cbind(SampleID = c(row.names(bmdexpress)),
+                      bmdexpress,
+                      stringsAsFactors = F)
+  bmdexpress <- rbind(c("Dose", as.character(DESeqDesign[colnames(bmdexpress)[-1],][, doseCol])),
+                      bmdexpress,
+                      stringsAsFactors = F)
+
+  # Creating BMDExpress input for relevance-filtered data
+  lognorm_relevance_filtered <- log2(relevance_filtered_data + 1)
+  bmdexpress_relevance_filtered <- fastbmd_relevance_filtered <- as.data.frame(lognorm_relevance_filtered)
+  bmdexpress_relevance_filtered <- cbind(SampleID = c(row.names(bmdexpress_relevance_filtered)),
+                                         bmdexpress_relevance_filtered,
+                                         stringsAsFactors = F)
+  bmdexpress_relevance_filtered <- rbind(c("Dose", as.character(DESeqDesign[colnames(bmdexpress_relevance_filtered)[-1],][, doseCol])),
+                                         bmdexpress_relevance_filtered,
+                                         stringsAsFactors = F)
+
+  if (!is.na(params$group_facet)) {
+    write.table(bmdexpress,
+                file = normalizePath(file.path(paths$DEG_output,
+                               paste0("bmdexpress_input_log2_transformed_",
+                                      paste(params$group_filter, collapse = "_"),
+                                      ".txt"))),
+                quote = F,
+                sep = "\t",
+                row.names = F,
+                col.names = T)
+    write.table(bmdexpress_relevance_filtered,
+                file = normalizePath(file.path(paths$DEG_output,
+                               paste0("bmdexpress_input_filtered_input_log2_transformed_",
+                                      paste(params$group_filter, collapse = "_"),
+                                      ".txt"))),
+                quote = F,
+                sep = "\t",
+                row.names = F,
+                col.names = T)
+  } else {
+    write.table(bmdexpress,
+                file = normalizePath(file.path(paths$DEG_output, "bmdexpress_input_log2_transformed.txt")),
+                quote = F,
+                sep = "\t",
+                row.names = F,
+                col.names = T)
+    write.table(bmdexpress_relevance_filtered,
+              file = normalizePath(file.path(paths$DEG_output, "bmdexpress_relevance_filtered_input_log2_transformed.txt")),
+              quote = F,
+              sep = "\t",
+              row.names = F,
+              col.names = T)
+  }
+}
+
+
+
+print(paste0("BMDExpress file is output to: ", normalizePath(file.path(paths$DEG_output, "bmdexpress_input_log2_transformed.txt"))))
+print(paste0("BMDExpress relevance-filtered file is output to: ", normalizePath(file.path(paths$DEG_output, "bmdexpress_relevance_filtered_input_log2_transformed.txt"))))
+```
+
+```{r run_pathway_analysis_child_document, child = pathway_analysis, eval = params$run_pathway_analysis}
+```
+
+# Methods Summary
+
+Please use this as a starting point for the bioinformatics/statistics section of any publications based on the data analyzed in this report. All of the information provided here is contained elsewhere in the report, but it is aggregated here for your convenience.  
+
+There were `r samples_before` samples for which data was collected. A count matrix containing the $`r initialSampleDataCount`$ samples sequenced in this experiment was imported into R for statistical analysis. After removing samples with less than $`r threshold`$ reads, `r filteredSampleDataCount` samples were left. Following the exclusion of other samples *(which ones? Why? Please explain for your experiment, if applicable.)*, there were `r samples_after` samples remaining. Following the recommendations set out by the Omics Data Analysis Frameworks for Regulatory application (R-ODAF) guidelines, genes were filtered to include only those where 75% of at least one experimental group were above `r MinCount` CPM, and spurious spikes were removed in which (max - median) of counts were less than (sum of counts)/(number of replicates + 1). The samples excluded from analysis are shown in the table below. We used DESeq2 `r packageVersion("DESeq2")` [@ggplotcitation] to test for differentially abundant genes within the `r Platform` data. The log2FoldChange shrinkage procedure used was `r resList[[1]]@priorInfo$type`. An alpha of `r alpha` was used to extract raw results, which are reported as the `r gsub(mcols(x=resList[[1]])$description[[4]],pattern=":.*",replacement="")`. To account for multiple testing, `r mcols(resList[[1]])$description[5]` are reported. Cook's cutoff was set to `r cooks` in this analysis. Differentially expressed genes (DEGs) were filtered using a linear fold change cutoff of `r linear_fc_filter` and adjusted p-value of `r alpha`.  
+
+## References {-}
+
+If these methods were used in your study, please cite the following papers as appropriate:  
+
+---
+nocite: '@*'
+---
+
+<div id="refs"></div>
+
+# Session Info
+
+## Date the report was generated.
+
+```{r reproducibility1, echo = FALSE}
+## Date the report was generated
+Sys.time()
+```
+
+## Parameters Used
+
+From the list elements in each params${variable} used to generate this report.
+
+```{r paramsList, echo = FALSE}
+df <- as.data.frame(unlist(params))
+names(df) <- "Parameter Value"
+knitr::kable(as.data.frame(df), format = "markdown")
+```
+
+## Wallclock time spent generating the report.
+
+```{r reproducibility2, echo = FALSE}
+## Processing time in seconds
+totalTime <- diff(c(startTime, Sys.time()))
+round(totalTime, digits = 3)
+```
+
+## `R` session information.
+
+```{r reproducibility3, echo = FALSE}
+## Session info
+options(width = 120)
+session_info()
+```
+
+## Pandoc version used: `r rmarkdown::pandoc_version()`.
+
+```{r 'save_final', show = FALSE}
+# Save complete workspace
+if (is.na(params$group_facet)) {
+  save.image(file = normalizePath(file.path(paths$RData, "Complete_analysis.RData")))
+  print(paste0(".RData saved to:  ", normalizePath(file.path(paths$RData, "Complete_analysis.RData"))))
+} else {
+  save.image(file = normalizePath(file.path(paths$RData,
+                              paste0("Complete_analysis_",
+                                     paste(params$group_filter, collapse = "_"),
+                                     ".RData"))))
+  print(paste0(".RData saved to:  ", normalizePath(file.path(paths$RData,
+                              paste0("Complete_analysis_",
+                                     paste(params$group_filter, collapse = "_"),
+                                     ".RData")))))
+}
+# Add a flag to the start of the script with if statements in all code chunks to check if the flag is set.
+# If flag is TRUE, run analysis; if flag is FALSE, SKIP analysis and continue here (just to modify plotting output).
+```
+
+<div class="tocify-extend-page" data-unique="tocify-extend-page" style="height: 0;"></div>

@@ -15,7 +15,7 @@ CURRENT_DIR=$(pwd)
 TARGET_SCRIPT="R-ODAF_1_sequencing_DataPreProcess.sh"
 
 # Define the Study id
-STUDY_ID="Study_dir"
+STUDY_ID="Study_id_N_Compound_n_day_exposure"
 
 # Print the STUDY_ID_DIR to verify
 echo "Processing directory: $STUDY_ID_DIR"

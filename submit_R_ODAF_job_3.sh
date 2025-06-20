@@ -15,7 +15,7 @@ CURRENT_DIR=$(pwd)
 TARGET_SCRIPT="R-ODAF_3_render_DESeq2_report.R"
 
 # Define the study ID directory
-export STUDY_ID_DIR="Study_dir"
+export STUDY_ID_DIR="Study_id_N_Compound_n_day_exposure"
 
 # Run the apptainer command with the current directory bound
 # Note: ~/projects/def-someaccount/group_writable/r-odaf_default.sif should point to wherever your apptainer image is stored
