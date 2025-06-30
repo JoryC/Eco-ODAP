@@ -123,10 +123,27 @@ lcrd_bootstrap <- function(x, seed = 1, repeats = 2000, lcrdratiocut = 1.778, lc
 #### Pathway Bootstrap ####
 pathway_bootstrap <- function(x, seed = 1, repeats = 2000) {
   set.seed(seed)
+  
+  # Unlist the data once to avoid doing it repeatedly
+  data_vector <- unlist(x)
+  data_length <- length(data_vector)
+  
+  # Handle the case where there's only one value
+  if (data_length == 1) {
+    # Option 1: Simply return the original value with appropriate quantiles
+    # Since bootstrapping a single value will always return the same value
+    return(setNames(rep(data_vector, 3), c("2.5%", "50%", "97.5%")))
+    
+    # Option 2: If you prefer sampling behavior even for single values:
+    # data_vector <- c(data_vector)  # Force it to be treated as a vector
+  }
+  
+  # Perform the bootstrap
   boot_pathway <- replicate(repeats, {
-    sampleData <- sample(unlist(x), length(unlist(x)), replace = TRUE)
+    sampleData <- sample(data_vector, data_length, replace = TRUE)
     median(sampleData)
   })
+  
   return(quantile(boot_pathway, probs = c(0.025, 0.5, 0.975)))
 }
 

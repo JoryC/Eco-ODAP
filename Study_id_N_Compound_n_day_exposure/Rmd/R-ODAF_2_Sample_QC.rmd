@@ -2,12 +2,13 @@
 params:
   projectdir: !expr paste0("/mnt/", Sys.getenv("STUDY_ID_DIR"))
   project_name: !expr Sys.getenv("STUDY_ID_DIR")
+  countmatdir: !expr paste0("/mnt/", Sys.getenv("STUDY_ID_DIR"), "/output/", Sys.getenv("ALIGN_QUANT_METHOD"))
   clust_method: "spearman" # For clustering
   tree_height_cutoff: 0.1 # For clustering
   dendro_color_by: "Dose" # Specify how you would like to color the dendrograms
-  nmr_threshold: 1000000 # 10% of 1M reads for TempOSeq = 100,000; 10% of 10M reads for RNA-Seq = 1,000,000.
+  nmr_threshold: 25 # 10% of 1M reads for TempOSeq = 100,000; 10% of 10M reads for RNA-Seq = 1,000,000.
   align_threshold: 0.7 # 50% alignment rate for Targeted-RNAseq Experiments, 70% for RNA-seq
-  gini_cutoff: 0.95 # If dataset has no replicates, set gini to 1... DEFAULT TO (0.99)
+  gini_cutoff: 0.99 # If dataset has no replicates, set gini to 1... DEFAULT TO (0.99)
   q30_cutoff: 0.7 # Discard samples if % of Q scores ≥ 30 was less than 70% by default
   forward_reverse_q30_diff_cutoff: 0.25 # Discard samples if the difference in the q30_percentage is greater than 0.25 by default. This is not necessary for single reads.
   PCA_cutoff: 0.2 # Default is 20%. Sample not clustering with their dose replicates (>20% variance) are removed
@@ -29,11 +30,11 @@ output:
     theme: spacelab # flatly spacelab sandstone cerulean
     code_download: true
 bibliography: "`r file.path('/mnt', Sys.getenv('STUDY_ID_DIR'), 'Rmd', 'references.bib')`"
-title: "`r paste('Study-wide sample quality control:', gsub(pattern = '_', replacement = ' ', x = Sys.getenv('STUDY_ID_DIR')))`"
+title: "`r paste('Study-wide sample quality control: ', gsub(pattern = '_', replacement = ' ', x = Sys.getenv('STUDY_ID_DIR')), ' - ', Sys.getenv('ALIGN_QUANT_METHOD'))`"
 author: "Jory Curry"
 ---
 
-# `r paste('Study-wide sample quality control:', gsub(pattern = '_', replacement = ' ', x = Sys.getenv('STUDY_ID_DIR')))`
+# `r paste('Study-wide sample quality control:', gsub(pattern = '_', replacement = ' ', x = Sys.getenv('STUDY_ID_DIR')), ' - ', Sys.getenv('ALIGN_QUANT_METHOD'))`
 
 ***
 
@@ -50,6 +51,34 @@ The metadata you use should have the following columns with T or F listed for ea
 * `solvent_control`  
 
 ***
+
+```{r params_define_in_testing, message=F, warnings=F, echo=F, eval=F}
+# Create the params list object
+params <- list(
+  projectdir = paste0("/mnt/", Sys.getenv("STUDY_ID_DIR")),
+  project_name = Sys.getenv("STUDY_ID_DIR"),
+  countmatdir = paste0("/mnt/", Sys.getenv("STUDY_ID_DIR"), "/output/", Sys.getenv("ALIGN_QUANT_METHOD")),
+  clust_method = "spearman",           # For clustering
+  tree_height_cutoff = 0.8,            # For clustering
+  dendro_color_by = "Dose",            # Specify how you would like to color the dendrograms
+  nmr_threshold = 25,                  # 10% of 1M reads for TempOSeq = 100,000; 10% of 10M reads for RNA-Seq = 1,000,000
+  align_threshold = 0.1,               # 50% alignment rate for Targeted-RNAseq Experiments, 70% for RNA-seq
+  gini_cutoff = 0.99,                  # If dataset has no replicates, set gini to 1... DEFAULT TO (0.99)
+  q30_cutoff = 0.1,                    # Discard samples if % of Q scores ≥ 30 was less than 70% by default
+  forward_reverse_q30_diff_cutoff = 0.25, # Discard samples if the difference in the q30_percentage is greater than 0.25 by default
+  PCA_cutoff = 0.8,                    # Default is 20%. Sample not clustering with their dose replicates (>20% variance) are removed
+  sampledata_sep = "\t",               # Comma for TempO-Seq, Maybe tabs for RNASeq, customize!
+  groups = list("Compound", "Dose"),   # These should be "interesting" groups for your analysis
+  batch_var = NULL,                    # "batch"
+  dose = "Dose",                       # If there is a dose in the experiment, e.g., "Dose"; otherwise use NULL
+  treatment_var = "Compound",
+  Platform = "RNA-Seq",                # TempO-Seq Or RNA-Seq
+  technical_control = "technical_control", # Column names for metadata, if applicable
+  reference_rna = "reference_rna",     # Column names for metadata, if applicable
+  solvent_control = "solvent_control"  # Column names for metadata, if applicable
+)
+
+```
 
 ```{r load_libraries, message = F, warnings = F, echo = F}
 
@@ -68,39 +97,40 @@ startTime <- Sys.time()
 #NOTE: use the updated_my_r_pkgs conda env
 #personal_lib_path <- "~/R_libs"
 
-library(edgeR)                      #In default r_pkgs conda env and my_r_pkgs conda env
-library(ggplot2)                    #In default r_pkgs conda env and my_r_pkgs conda env
-library(data.table)                 #In default r_pkgs conda env and my_r_pkgs conda env
-library(cluster)                    #In default r_pkgs conda env and my_r_pkgs conda env
-#library(extrafont)                 #NEW - fonts...
-#library(showtextdb)                #NEW - need fonts to render reports: In my_r_pkgs conda env
-#library(showtext)                  #NEW - use fonts in reports: In my_r_pkgs conda env
-library(Cairo)                      # In updated_my_r_pkgs conda env
-library(jsonlite)                   # In updated_my_r_pkgs conda env #NEW!
-library(sfsmisc)                    #In my_r_pkgs conda env
-library(fields)                     #In my_r_pkgs conda env
-library(heatmap3)                   #In my_r_pkgs conda env
-library(DESeq2)                     #In default r_pkgs conda env and my_r_pkgs conda env
-library(tidyverse)                  #In my_r_pkgs conda env
-library(foreach)                    #In my_r_pkgs conda env
-library(doParallel)                 #In my_r_pkgs conda env
-library(UpSetR)                     #In my_r_pkgs conda env
-library(GGally)                     #In my_r_pkgs conda env
-library(pheatmap)                   #In default r_pkgs conda env and my_r_pkgs conda env
-#library(ComplexHeatmap, lib.loc = "~/R_libs")#All conda versions are incompatible with other packages
-library(kableExtra)                 #In my_r_pkgs conda env
-library(dendextend)                 #In my_r_pkgs conda env
-library(dendsort)                   #In my_r_pkgs conda env
-library(rrcov)                      #In my_r_pkgs conda env
-library(cellWise, lib.loc = "~/R_libs")#In my_r_pkgs conda env - I had to manually download an archived version compatible with R 3.6.3
-library(vtree)                      #In my_r_pkgs conda env
-#library(here)                       #In my_r_pkgs conda env
-library(devtools)                   # In updated_my_r_pkgs conda env #NEW!
+library(edgeR)
+library(ggplot2)
+library(data.table)
+library(cluster)
+#library(extrafont)
+#library(showtextdb)
+#library(showtext)
+library(Cairo)
+library(jsonlite)
+library(sfsmisc)
+library(fields)
+library(heatmap3)
+library(DESeq2)
+library(tidyverse)
+library(foreach)
+library(doParallel)
+library(UpSetR)
+library(GGally)
+library(pheatmap)
+#library(ComplexHeatmap, lib.loc = "~/R_libs")
+library(kableExtra)
+library(dendextend)
+library(dendsort)
+library(rrcov)
+library(cellWise)
+library(vtree)
+#library(here)
+library(devtools)
 ```
 
 
 ```{r params, include = FALSE, echo = FALSE, message = FALSE}
 projectdir <- params$projectdir
+count_matrix_dir <- params$countmatdir
 chemical_name <- sub("^.*Study_id_\\d+_([^_]+)_\\d+(\\.\\d+)?_day_exposure$", "\\1", projectdir)
 clust_method <- params$clust_method
 tree_height_cutoff <- params$tree_height_cutoff
@@ -139,7 +169,7 @@ paths$root <- "/mnt"
 paths$data <- projectdir
 paths$output <- paste0(paths$data, "/output")
 paths$processed <-
-  paste0(paths$output, "/Trimmed_reads/RSEM/") #This directory should be contain the count table output by R-ODAF_1_sequencing_DataPreprocess...
+  count_matrix_dir #This directory should be contain the count table output by R-ODAF_1_sequencing_DataPreprocess...
 paths$metadata <-
   paths$root #Back to GSE Accession ID parent directory that contains the metadata file, e.g., normalizePath(file.path(paths$root, ".."))
 # Need to update this path... temporary for testing purposes
@@ -170,92 +200,21 @@ include_safe_graphics <- function(file_path) {
 ############################################################################
 # FILES TO LOAD
 ############################################################################
-
-# A. File with read counts
-if (Platform == "TempO-Seq") {
-  ########################################################################
-  SampleDataFile <-
-    normalizePath(file.path(paths$output, "count_table.csv"))
-  MappedUnmapped <-
-    normalizePath(file.path(paths$output, "mapped_unmapped.csv"))
-  sampledata_sep <- ","
-  collapse_reps <- function(filepath) {
-    df <- read.table(file = filepath,
-                     sep = ",",
-                     header = T)
-    names(df) = gsub(pattern = "_trimmed",
-                     replacement = "",
-                     x = names(df))
-    df <- df %>% pivot_longer(
-      cols = -c("X"),
-      names_to = c('.value', 'flowcell'),
-      names_pattern = '(.*)_(.*)'
-    )
-    df[is.na(df)] <- 0
-    sampleDataTable <-
-      data.table(df %>% dplyr::select(-c(flowcell)))
-    results <- sampleDataTable[, lapply(.SD, sum), by = "X"]
-    return(results)
-  }
-  sampleData <- collapse_reps(SampleDataFile)
-  MappedUnmapped <- collapse_reps(MappedUnmapped)
-  write.table(
-    sampleData,
-    file = normalizePath(file.path(paths$processed, "count_table.csv")),
-    sep = ",",
-    quote = F,
-    row.names = F
+# A. Tab delimited count matrix with at least 2 columns:
+SampleDataFile <-
+  normalizePath(file.path(paths$processed, "genes.data.tsv")) #projectdir/output/count_matrix_dir/genes.data.tsv
+sampleData <- read.table(
+  SampleDataFile,
+  sep = sampledata_sep,
+  #Typically \t
+  stringsAsFactors = FALSE,
+  header = TRUE,
+  quote = "\"",
+  row.names = 1,
+  #first col is rownames
+  check.names = FALSE  
   )
-  write.table(
-    MappedUnmapped,
-    file = normalizePath(file.path(
-      paths$processed, "mapped_unmapped.csv"
-    )),
-    sep = ",",
-    quote = F,
-    row.names = F
-  )
-  sampleData <-
-    read.table(
-      normalizePath(file.path(paths$processed, "count_table.csv")),
-      sep = sampledata_sep,
-      stringsAsFactors = FALSE,
-      header = TRUE,
-      quote = "\"",
-      row.names = 1,
-      check.names = FALSE
-    )
-  mu <-
-    read.table(
-      normalizePath(file.path(
-        paths$processed, "mapped_unmapped.csv"
-      )),
-      sep = ",",
-      header = T,
-      row.names = 1,
-      stringsAsFactors = F,
-      check.names = F
-    )
-  mu <- as.data.frame(t(mu))
-  mu$pct_mapped <- mu$mapped / (mu$mapped + mu$unmapped)
-  ########################################################################
-} else {
-  #Any other sequencing technology
-  SampleDataFile <-
-    normalizePath(file.path(paths$processed, "genes.data.tsv")) #projectdir/output/Trimmed_reads/RSEM/genes.data.tsv
-  sampleData <- read.table(
-    SampleDataFile,
-    sep = sampledata_sep,
-    #Typically \t
-    stringsAsFactors = FALSE,
-    header = TRUE,
-    quote = "\"",
-    row.names = 1,
-    #first col is rownames
-    check.names = FALSE
-  )
-  mu <- NULL
-}
+mu <- NULL
 
 # B. Tab delimited sample information file with at least 2 columns:
 #    1. sample names identical to the column names of sampleData
@@ -351,12 +310,13 @@ For paired-end data, if the difference between the sample's Q30 percentage from 
 parse_fastp_json <- function(json_dir, q30_params) {
   # Check if directory exists and contains JSON files
   if (!dir.exists(json_dir) ||
-      length(list.files(json_dir, pattern = "\\.json$", full.names = TRUE)) == 0) {
+      length(list.files(json_dir, pattern = "\\.fastp\\.json$", full.names = TRUE)) == 0) {
     print(
       "Q30 scores are not available in JSON files to analyze in the fastpQC output directory, please review."
     )
     return(NULL)
   }
+  
   # Helper function to calculate Q30 percentages
   calculate_q30_percentage <- function(data) {
     list(
@@ -380,77 +340,176 @@ parse_fastp_json <- function(json_dir, q30_params) {
     stringsAsFactors = FALSE
   )
   
-  # List all JSON files in the directory
-  json_files <-
-    list.files(json_dir, pattern = "\\.json$", full.names = TRUE)
+  # List all JSON files in the directory, excluding the log file
+  json_files <- list.files(json_dir, pattern = "\\.fastp\\.json$", full.names = TRUE)
   
-  for (file in json_files) {
-    # Read the JSON file
-    data <- jsonlite::fromJSON(file)
+  message(paste("Processing", length(json_files), "JSON files..."))
+  
+  # Process each file, skipping any that are corrupted
+  for (i in seq_along(json_files)) {
+    file <- json_files[i]
+    sample_name <- gsub("\\.fastp\\.json$", "", basename(file))
     
-    # Extract the sample name
-    sample_name <-
-      gsub("_fastp\\.json|PE_fastp\\.json", "", basename(file))
+    message(paste0("Processing file ", i, " of ", length(json_files), ": ", sample_name))
     
-    # Calculate Q30 percentages
-    q30_percentages <- calculate_q30_percentage(data)
-    
-    if (grepl("PE_fastp\\.json$", file)) {
-      # Paired-end data
-      read1_q30_after <-
-        data$read1_after_filtering$q30_bases / data$read1_after_filtering$total_bases * 100
-      read2_q30_after <-
-        data$read2_after_filtering$q30_bases / data$read2_after_filtering$total_bases * 100
+    # Use tryCatch to handle potential errors when reading JSON files
+    json_data <- tryCatch({
+      # First check if the file is readable and complete
+      json_text <- readLines(file, warn = FALSE)
+      if (length(json_text) == 0) {
+        warning(paste("Empty JSON file:", file, "- skipping"))
+        next
+      }
       
-      diff_before <-
-        abs(
-          data$read1_before_filtering$q30_bases / data$read1_before_filtering$total_bases * 100 -
-            data$read2_before_filtering$q30_bases / data$read2_before_filtering$total_bases * 100
-        )
+      # Validate JSON structure
+      #if (!grepl("\\}\\s*$", paste(tail(json_text, 1), collapse=""))) {
+      #  warning(paste("Incomplete JSON file:", file, "- skipping"))
+      #  next
+      #
+      
+      # Parse the JSON
+      jsonlite::fromJSON(file)
+    }, error = function(e) {
+      warning(paste("Error reading JSON file:", file, "- Error:", e$message))
+      return(NULL)
+    })
+    
+    # Skip this file if reading failed
+    if (is.null(json_data)) {
+      next
+    }
+    
+    # Check for valid structure - handle both flat and nested formats
+    keys <- names(unlist(json_data, recursive = FALSE))
+    
+    # Check for necessary data structures using a more flexible approach
+    has_summary_structure <- any(grepl("^summary\\.", keys)) || "summary" %in% names(json_data)
+    has_before_filtering <- any(grepl("before_filtering", keys))
+    has_after_filtering <- any(grepl("after_filtering", keys))
+    
+    if (!all(c(has_summary_structure, has_before_filtering, has_after_filtering))) {
+      warning(paste("JSON file has unexpected structure:", file, "- skipping"))
+      next
+    }
+    
+    # Calculate Q30 percentages with error handling
+    q30_percentages <- tryCatch({
+      calculate_q30_percentage(json_data)
+    }, error = function(e) {
+      warning(paste("Error calculating Q30 for file:", file, "- Error:", e$message))
+      return(NULL)
+    })
+    
+    if (is.null(q30_percentages)) {
+      next
+    }
+    
+    # Determine if this is paired-end data by checking for read1/read2 fields
+    is_paired <- any(grepl("read1_after_filtering", keys)) && any(grepl("read2_after_filtering", keys))
+    
+    if (is_paired) {
+      # Handle paired-end data, safely extract values
+      # This will work for both nested and flat structures
+      read1_q30_after <- tryCatch({
+        if ("read1_after_filtering" %in% names(json_data)) {
+          # Flat structure
+          json_data$read1_after_filtering$q30_bases / json_data$read1_after_filtering$total_bases * 100
+        } else {
+          # Might be nested differently
+          r1_after <- json_data[[grep("read1_after_filtering", names(json_data), value = TRUE)]]
+          r1_after$q30_bases / r1_after$total_bases * 100
+        }
+      }, error = function(e) {
+        warning(paste("Error extracting read1_after_filtering data:", e$message))
+        return(NA)
+      })
+      
+      read2_q30_after <- tryCatch({
+        if ("read2_after_filtering" %in% names(json_data)) {
+          # Flat structure
+          json_data$read2_after_filtering$q30_bases / json_data$read2_after_filtering$total_bases * 100
+        } else {
+          # Might be nested differently
+          r2_after <- json_data[[grep("read2_after_filtering", names(json_data), value = TRUE)]]
+          r2_after$q30_bases / r2_after$total_bases * 100
+        }
+      }, error = function(e) {
+        warning(paste("Error extracting read2_after_filtering data:", e$message))
+        return(NA)
+      })
+      
+      # Similarly for before filtering data
+      read1_q30_before <- tryCatch({
+        if ("read1_before_filtering" %in% names(json_data)) {
+          json_data$read1_before_filtering$q30_bases / json_data$read1_before_filtering$total_bases * 100
+        } else {
+          r1_before <- json_data[[grep("read1_before_filtering", names(json_data), value = TRUE)]]
+          r1_before$q30_bases / r1_before$total_bases * 100
+        }
+      }, error = function(e) {
+        warning(paste("Error extracting read1_before_filtering data:", e$message))
+        return(NA)
+      })
+      
+      read2_q30_before <- tryCatch({
+        if ("read2_before_filtering" %in% names(json_data)) {
+          json_data$read2_before_filtering$q30_bases / json_data$read2_before_filtering$total_bases * 100
+        } else {
+          r2_before <- json_data[[grep("read2_before_filtering", names(json_data), value = TRUE)]]
+          r2_before$q30_bases / r2_before$total_bases * 100
+        }
+      }, error = function(e) {
+        warning(paste("Error extracting read2_before_filtering data:", e$message))
+        return(NA)
+      })
+      
+      # Calculate differences
+      diff_before <- abs(read1_q30_before - read2_q30_before)
       diff_after <- abs(read1_q30_after - read2_q30_after)
       
-      passes_diff_threshold <-
+      # Check thresholds
+      passes_diff_threshold <- 
+        !is.na(diff_before) && !is.na(diff_after) &&
         diff_before <= q30_params$forward_reverse_q30_diff_cutoff * 100 &&
         diff_after <= q30_params$forward_reverse_q30_diff_cutoff * 100
-      passes_q30_threshold <-
-        (read1_q30_after >= q30_params$q30_cutoff * 100) &
+      
+      passes_q30_threshold <- 
+        !is.na(read1_q30_after) && !is.na(read2_q30_after) &&
+        (read1_q30_after >= q30_params$q30_cutoff * 100) &&
         (read2_q30_after >= q30_params$q30_cutoff * 100)
-      
-      results <- results %>%
-        add_row(
-          sample_name = sample_name,
-          q30_before = q30_percentages$before_filtering,
-          q30_after = q30_percentages$after_filtering,
-          read1_q30_after = read1_q30_after,
-          read2_q30_after = read2_q30_after,
-          diff_r1_r2_before = diff_before,
-          diff_r1_r2_after = diff_after,
-          passes_q30_threshold = passes_q30_threshold,
-          passes_diff_threshold = passes_diff_threshold,
-          is_paired_end = TRUE
-        )
     } else {
-      # Single-end data
-      passes_diff_threshold <- TRUE
-      passes_q30_threshold <-
-        q30_percentages$after_filtering >= q30_params$q30_cutoff * 100
-      
-      results <- results %>%
-        add_row(
-          sample_name = sample_name,
-          q30_before = q30_percentages$before_filtering,
-          q30_after = q30_percentages$after_filtering,
-          read1_q30_after = NA,
-          read2_q30_after = NA,
-          diff_r1_r2_before = NA,
-          diff_r1_r2_after = NA,
-          passes_q30_threshold = passes_q30_threshold,
-          passes_diff_threshold = passes_diff_threshold,
-          is_paired_end = FALSE
-        )
+      # Handle single-end data
+      read1_q30_after <- NA
+      read2_q30_after <- NA
+      diff_before <- NA
+      diff_after <- NA
+      passes_diff_threshold <- TRUE  # Not applicable for single-end
+      passes_q30_threshold <- q30_percentages$after_filtering >= q30_params$q30_cutoff * 100
     }
+    
+    # Add to results dataframe
+    results <- rbind(results, data.frame(
+      sample_name = sample_name,
+      q30_before = q30_percentages$before_filtering,
+      q30_after = q30_percentages$after_filtering,
+      read1_q30_after = read1_q30_after,
+      read2_q30_after = read2_q30_after,
+      diff_r1_r2_before = diff_before,
+      diff_r1_r2_after = diff_after,
+      passes_q30_threshold = passes_q30_threshold,
+      passes_diff_threshold = passes_diff_threshold,
+      is_paired_end = is_paired,
+      stringsAsFactors = FALSE
+    ))
   }
   
+  # Check if we processed any files successfully
+  if (nrow(results) == 0) {
+    warning("No valid JSON files were successfully processed.")
+    return(NULL)
+  }
+  
+  message(paste("Successfully processed", nrow(results), "of", length(json_files), "JSON files."))
   return(results)
 }
 
@@ -460,8 +519,8 @@ plot_q30_scores <- function(results) {
     return()
   }
   # Separate single-end and paired-end data
-  single_end_data <- results %>% filter(!is_paired_end)
-  paired_end_data <- results %>% filter(is_paired_end)
+  single_end_data <- results %>% dplyr::filter(!is_paired_end)
+  paired_end_data <- results %>% dplyr::filter(is_paired_end)
   
   # Plot single-end data
   if (nrow(single_end_data) > 0) {
@@ -497,22 +556,22 @@ plot_q30_scores <- function(results) {
     print(p_single)
     ggsave(p_single,
            file = paste0(paths$output, "/Q30_plot_single_end_reads.pdf"))
-    #knitr::include_graphics(paste0(paths$output, "/Q30_plot_single_end_reads.pdf"))
+    #include_safe_graphics(paste0(paths$output, "/Q30_plot_single_end_reads.pdf"))
   }
   
   # Plot paired-end data
   if (nrow(paired_end_data) > 0) {
     paired_end_data_long <- paired_end_data %>%
-      select(sample_name,
+      dplyr::select(sample_name,
              read1_q30_after,
              read2_q30_after,
              diff_r1_r2_after) %>%
-      pivot_longer(
+      tidyr::pivot_longer(
         cols = c("read1_q30_after", "read2_q30_after"),
         names_to = "read",
         values_to = "q30_after"
       ) %>%
-      mutate(read = stringr::str_split(read, pattern = "_q30_", simplify = TRUE)[, 1])
+      dplyr::mutate(read = stringr::str_split(read, pattern = "_q30_", simplify = TRUE)[, 1])
     
     p_paired <-
       ggplot(
@@ -557,7 +616,7 @@ plot_q30_scores <- function(results) {
     print(p_paired)
     ggsave(p_paired,
            file = paste0(paths$output, "/Q30_plot_paired_end_reads.pdf"))
-    #knitr::include_graphics(paste0(paths$output, "/Q30_plot_paired_end_reads.pdf"))
+    #include_safe_graphics(paste0(paths$output, "/Q30_plot_paired_end_reads.pdf"))
   }
 }
 
@@ -565,7 +624,7 @@ plot_q30_scores <- function(results) {
 q30_params <-
   list(q30_cutoff = q30_cutoff,
        forward_reverse_q30_diff_cutoff = forward_reverse_q30_diff_cutoff)
-json_dir <- paste0(paths$output, "/Trimmed_reads/fastpQCoutput/")
+json_dir <- paste0(paths$output, "/fastp/")
 results_df <- parse_fastp_json(json_dir, q30_params)
 if (!is.null(results_df)) {
   #print(results_df)
@@ -580,193 +639,590 @@ if (!is.null(results_df)) {
   plot_q30_scores(results_df)
 }
 
+is_paired <- results_df$is_paired_end[1]
+
 ```
 
-## Read mapping percentage
+## Read alignment percentage
 
-A read mapping percentage cutoff of `r align_threshold*100`% is used to separate outliers.
+A read alignment percentage cutoff of `r align_threshold*100`% is used to separate outliers.
 
 ```{r Percent_Mapping_filtering, echo=FALSE, eval=TRUE, warning=FALSE, fig.height=8, fig.width=10, out.width='100%', out.height='100%'}
 
+# Load necessary libraries
+library(tidyverse)
 
-#NOTE: CHANGE FOR TEMPO-SEQ
-
-#Percent Mapping
-#File location example - ~/scratch/2024_tPOD_Curation_Project/GSE228670/Study_id_50_PFBS_4.83_day_exposure/output/Trimmed_reads/MultiQC/MultiQC_Report_data/multiqc_star.txt
-
-mqc_star_path <-
-  normalizePath(
-    file.path(
-      paths$output,
-      "Trimmed_reads",
-      "MultiQC",
-      "MultiQC_Report_data",
-      "multiqc_star.txt"
-    )
-  )
+# Set alignment threshold
 alignment_threshold <- align_threshold
-#nmr_threshold <- params$nmr_threshold
+nmr_threshold <- nmr_threshold
+
+# Function to add comma separators
+add_commas <- function(x) {
+  format(x, big.mark = ",", scientific = FALSE)
+}
+
+# Determine the file path based on the alignment/quantification method
+align_quant_method <- Sys.getenv("ALIGN_QUANT_METHOD")
+
+# Initialize qc_path
+qc_path <- NULL
+
+if (align_quant_method == "star_salmon") {
+  # Check if the directory exists
+  multiqc_dir <- file.path(paths$reports, "multiqc_data")
+  if (!dir.exists(multiqc_dir)) {
+    print("Did not find the QC output from the STAR tool. The multiqc_report_data directory is missing. Please review.")
+  } else {
+    print("MultiQC found the QC output from the STAR tool.")
+    qc_path <- normalizePath(file.path(multiqc_dir, "multiqc_star.txt"), mustWork = FALSE)
+  }
+} else if (align_quant_method == "star_rsem") {
+  # Check if the directory exists
+  multiqc_dir <- file.path(paths$reports, "multiqc_data")
+  if (!dir.exists(multiqc_dir)) {
+    print("Did not find the QC output from the RSEM tool. The multiqc_report_data directory is missing. Please review.")
+  } else {
+    print("MultiQC found the QC output from the RSEM tool.")
+    qc_path <- normalizePath(file.path(multiqc_dir, "samtools_alignment_plot.txt"), mustWork = FALSE)
+  }
+} else if (align_quant_method == "salmon") {
+  # Check if the directory exists
+  salmon_dir <- file.path(paths$output, align_quant_method)
+  if (!dir.exists(salmon_dir)) {
+    print("Did not find the QC output from the Salmon tool.")
+  } else {
+    print("Found the QC output from the Salmon tool.")
+    qc_path <- normalizePath(file.path(salmon_dir, "unique_multimapped_reads.txt"), mustWork = FALSE)
+  }
+} else if (align_quant_method == "kallisto") {
+  # Check if the directory exists
+  kallisto_dir <- file.path(paths$output, align_quant_method)
+  if (!dir.exists(kallisto_dir)) {
+    print("Did not find the QC output from the Kallisto tool.")
+  } else {
+    print("Found the QC output from the Kallisto tool.")
+    qc_path <- normalizePath(file.path(kallisto_dir, "unique_multimapped_reads.txt"), mustWork = FALSE)
+  }
+} else {
+  stop("Unsupported alignment method specified.")
+}
 
 # Check if the file exists
-if (!file.exists(mqc_star_path)) {
-  print(
-    "MultiQC did not find the QC output from the STAR tool. The multiqc_star.txt file is missing from mqc_star_path. Please review."
+if (is.null(qc_path) || !file.exists(qc_path)) {
+  stop(
+    "Did not find the QC output file at ", qc_path, 
+    ". Please review the multiqc directory or the pseudoalignment directory along with the calculate_unique_multimapped_reads_X.sh script."
   )
-} else {
-  mqc_star <-
-    list.files(
-      path = paste0(
-        paths$output,
-        "/Trimmed_reads/MultiQC/MultiQC_Report_data"
-      ),
-      pattern = "multiqc_star.txt",
-      full.names = TRUE
+}
+
+# Process data based on alignment method
+if (align_quant_method %in% c("salmon", "kallisto")) {
+  # Process salmon/kallisto file
+  lines <- readLines(qc_path)
+  summary_start <- grep("Summary Statistics:", lines)
+  data_lines <- lines[1:(summary_start - 1)]
+  temp_file <- tempfile()
+  writeLines(data_lines, temp_file)
+  data <- read.delim(temp_file, quote = "", header = TRUE, 
+                     stringsAsFactors = FALSE, fill = TRUE, sep = "")
+  unlink(temp_file)
+  
+  # Create plot data
+  plot_data <- data %>%
+    dplyr::select(Sample, Pct_Unique_of_Total, Pct_Multi_of_Total) %>%
+    dplyr::rename(
+      uniquely_mapped_percent = Pct_Unique_of_Total,
+      multimapped_percent = Pct_Multi_of_Total
+    ) %>%
+    tidyr::pivot_longer(
+      cols = c(uniquely_mapped_percent, multimapped_percent),
+      names_to = "Mapping_Type",
+      values_to = "Percentage"
     )
-  starqc <- read_delim(file = mqc_star, delim = "\t")
+  
+  #Create plot data for raw counts
+  raw_data <- data
+  long_counts <- data %>%
+    dplyr::select(Sample, N_Unique.Reads, N_Multi.Reads) %>%
+    dplyr::rename(uniquely_mapped = N_Unique.Reads, multimapped = N_Multi.Reads) %>%
+    tidyr::pivot_longer(
+      cols = c(uniquely_mapped, multimapped),
+      names_to = "Mapping_Type",
+      values_to = "Count"
+    )
+
+    #Create qc_data object for QAQC table
+    align_map_qc_data <- data %>%
+      dplyr::select(Sample, N_Total.Mapped, Pct_Mapped_of_Total) %>%
+      dplyr::rename(total_mapped = N_Total.Mapped, total_mapped_percent = Pct_Mapped_of_Total) %>%
+      dplyr::mutate(
+        passed_alignment_threshold = if_else(
+          condition = total_mapped_percent >= alignment_threshold * 100,
+          true = TRUE,
+          false = FALSE
+        )
+      ) %>%
+      dplyr::arrange(desc(total_mapped_percent))
+
+} else if (align_quant_method == "star_salmon") {
+  # Process STAR-Salmon data
+  starqc <- read_delim(file = qc_path, delim = "\t")
   starqc <- starqc %>%
-    mutate(
+    dplyr::mutate(
       total_mapped_percent = multimapped_percent + uniquely_mapped_percent,
       total_mapped = uniquely_mapped + multimapped
     ) %>%
-    mutate(
+    dplyr::mutate(
       passed_alignment_threshold = if_else(
         condition = total_mapped_percent >= alignment_threshold * 100,
         true = TRUE,
         false = FALSE
       )
     ) %>%
-    arrange(rev(total_mapped_percent))
-  
-  # Reshape data for plotting
-  starqc_long <- starqc %>%
-    select(Sample, uniquely_mapped_percent, multimapped_percent) %>%
-    pivot_longer(
+    dplyr::arrange(desc(total_mapped_percent))
+  #Create qc_data object for QAQC table
+  align_map_qc_data <- starqc
+
+  # Create plot data
+  plot_data <- starqc %>%
+    dplyr::select(Sample, uniquely_mapped_percent, multimapped_percent) %>%
+    tidyr::pivot_longer(
       cols = c(uniquely_mapped_percent, multimapped_percent),
       names_to = "Mapping_Type",
       values_to = "Percentage"
     )
   
-  # Create the stacked barplot for percentages
-  gg_percent_aligned <-
-    ggplot(starqc_long, aes(x = Sample, y = Percentage, fill = Mapping_Type)) +
-    geom_bar(stat = "identity") +
-    geom_hline(
-      yintercept = alignment_threshold * 100,
-      linetype = "dashed",
-      color = "black"
-    ) +  # Add horizontal line at 70%
-    geom_text(
-      data = starqc_long %>% filter(Mapping_Type == "uniquely_mapped_percent"),
-      aes(y = Percentage / 2, label = sprintf("%.1f%%", Percentage)),
-      color = "black",
-      size = 3.5,
-      angle = 90
-    ) +
-    geom_text(
-      data = starqc_long %>% filter(Mapping_Type == "multimapped_percent"),
-      aes(
-        y = Percentage / 2 + starqc$uniquely_mapped_percent,
-        label = sprintf("%.1f%%", Percentage)
-      ),
-      color = "black",
-      size = 3.5,
-      angle = 90
-    ) +
-    scale_y_continuous(
-      limits = c(0, 100),
-      breaks = seq(0, 100, by = 10),
-      expand = c(0, 0)
-    ) +
-    labs(x = "Sample", y = "Percentage Mapped", fill = "Mapping Type") +
-    scale_fill_manual(
-      values = c(
-        "uniquely_mapped_percent" = "yellow",
-        "multimapped_percent" = "lightblue"
-      ),
-      labels = c(
-        "uniquely_mapped_percent" = "Uniquely Mapped",
-        "multimapped_percent" = "Multi-mapped"
-      )
-    ) +
-    theme_minimal() +
-    theme(axis.text.x = element_text(angle = 45, hjust = 1))
-  
-  ggsave(
-    gg_percent_aligned,
-    file = paste0(paths$output, "/Percentage_Aligned_Threshold_Plot.pdf")
-  )
-  
-  # Reshape data for plotting
-  starqc_long_counts <- starqc %>%
-    select(Sample, uniquely_mapped, multimapped) %>%
-    pivot_longer(
+  # Create plot data for raw counts
+  long_counts <- starqc %>%
+    dplyr::select(Sample, uniquely_mapped, multimapped) %>%
+    tidyr::pivot_longer(
       cols = c(uniquely_mapped, multimapped),
       names_to = "Mapping_Type",
       values_to = "Count"
     )
+} else if (align_quant_method == "star_rsem") {
+  # Process STAR-RSEM data
+  starqc <- read_delim(file = qc_path, delim = "\t")
+  starqc <- starqc %>%
+    dplyr::mutate(
+      Total = `Mapped (with MQ>0)` + MQ0 + Unmapped,
+      total_mapped = `Mapped (with MQ>0)` + MQ0,
+      total_mapped_percent = (total_mapped / Total) * 100
+    ) %>%
+    dplyr::rename(
+      Unique = `Mapped (with MQ>0)`,
+      Multi = MQ0
+    ) %>%
+    dplyr::mutate(
+      passed_alignment_threshold = if_else(
+        condition = total_mapped_percent >= alignment_threshold * 100,
+        true = TRUE,
+        false = FALSE
+      )
+    ) %>%
+    dplyr::arrange(desc(total_mapped_percent))
+  #Create qc_data object for QAQC table
+  align_map_qc_data <- starqc
+
+  # Create plot data
+  plot_data <- starqc %>%
+    dplyr::select(Sample, Unique, Multi, Total) %>%
+    dplyr::mutate(
+      uniquely_mapped_percent = Unique / Total * 100,
+      multimapped_percent = Multi / Total * 100
+    ) %>%
+    tidyr::pivot_longer(
+      cols = c(uniquely_mapped_percent, multimapped_percent),
+      names_to = "Mapping_Type",
+      values_to = "Percentage"
+    )
   
-  # Function to add comma separators
-  add_commas <- function(x) {
-    format(x, big.mark = ",", scientific = FALSE)
-  }
-  
-  # Create the stacked barplot for raw counts
-  gg_raw_count_aligned <-
-    ggplot(starqc_long_counts,
-           aes(x = Sample, y = Count, fill = Mapping_Type)) +
-    geom_bar(stat = "identity") +
-    geom_hline(yintercept = nmr_threshold,
-               linetype = "dashed",
-               color = "black") +  # Add horizontal line at 10% of target seq depth
-    geom_text(
-      data = starqc_long_counts %>% filter(Mapping_Type == "uniquely_mapped"),
-      aes(y = Count / 2, label = add_commas(Count)),
-      color = "black",
-      size = 3.5,
-      angle = 90
-    ) +
-    geom_text(
-      data = starqc_long_counts %>% filter(Mapping_Type == "multimapped"),
-      aes(
-        y = Count / 2 + starqc$uniquely_mapped,
-        label = add_commas(Count)
-      ),
-      color = "black",
-      size = 3.5,
-      angle = 90
-    ) +
-    scale_y_continuous(labels = add_commas, expand = c(0, max(starqc_long_counts$Count) *
-                                                         0.05)) +
-    labs(x = "Sample", y = "Count", fill = "Mapping Type") +
-    scale_fill_manual(
-      values = c(
-        "uniquely_mapped" = "yellow",
-        "multimapped" = "lightblue"
-      ),
-      labels = c("uniquely_mapped" = "Uniquely Mapped", "multimapped" = "Multi-mapped")
-    ) +
-    theme_minimal() +
-    theme(axis.text.x = element_text(angle = 45, hjust = 1))
-  
-  ggsave(
-    gg_raw_count_aligned,
-    file = paste0(paths$output, "/Raw_Count_Aligned_Threshold_Plot.pdf")
-  )
-  
-  
-  #knitr::include_graphics(paste0(paths$output, "/Percentage_Aligned_Threshold_Plot.pdf"))
-  #knitr::include_graphics(paste0(paths$output, "/Raw_Count_Aligned_Threshold_Plot.pdf"))
+  #Create plot data for raw counts
+  long_counts <- starqc %>%
+    dplyr::select(Sample, Unique, Multi) %>%
+    dplyr::rename(uniquely_mapped = Unique, multimapped = Multi) %>%
+    tidyr::pivot_longer(
+      cols = c(uniquely_mapped, multimapped),
+      names_to = "Mapping_Type",
+      values_to = "Count"
+    )
 }
 
+# Create the stacked barplot for percentages
+gg_percent_aligned <-
+  ggplot(plot_data, aes(x = Sample, y = Percentage, fill = Mapping_Type)) +
+  geom_bar(stat = "identity") +
+  geom_hline(
+    yintercept = alignment_threshold * 100,
+    linetype = "dashed",
+    color = "black"
+  ) +  # Add horizontal line at threshold
+  geom_text(
+    data = plot_data %>% dplyr::filter(Mapping_Type == "uniquely_mapped_percent"),
+    aes(y = Percentage / 2, label = sprintf("%.1f%%", Percentage)),
+    color = "black",
+    size = 3.5,
+    angle = 90
+  ) +
+  geom_text(
+    data = plot_data %>% dplyr::filter(Mapping_Type == "multimapped_percent"),
+    aes(
+      y = Percentage / 2 + (plot_data %>% dplyr::filter(Mapping_Type == "uniquely_mapped_percent") %>% dplyr::pull(Percentage)),
+      label = sprintf("%.1f%%", Percentage)
+    ),
+    color = "black",
+    size = 3.5,
+    angle = 90
+  ) +
+  scale_y_continuous(
+    limits = c(0, 100),
+    breaks = seq(0, 100, by = 10),
+    expand = c(0, 0)
+  ) +
+  labs(x = "Sample", y = "Percentage Aligned", fill = "Alignment Type") +
+  scale_fill_manual(
+    values = c(
+      "uniquely_mapped_percent" = "yellow",
+      "multimapped_percent" = "lightblue"
+    ),
+    labels = c(
+      "uniquely_mapped_percent" = "Uniquely aligned",
+      "multimapped_percent" = "Multiple alignments"
+    )
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Print the plot
 print(gg_percent_aligned)
+#Save the plot
+ggsave(
+  gg_percent_aligned,
+  file = paste0(paths$output, "/Percentage_Aligned_Threshold_Plot.pdf")
+)
+
+# Create the stacked barplot for raw counts
+gg_raw_count_aligned <-
+  ggplot(long_counts,
+         aes(x = Sample, y = Count, fill = Mapping_Type)) +
+  geom_bar(stat = "identity") +
+  geom_hline(yintercept = nmr_threshold,
+             linetype = "dashed",
+             color = "black") +  # Add horizontal line at threshold
+  geom_text(
+    data = long_counts %>% dplyr::filter(Mapping_Type == "uniquely_mapped"),
+    aes(y = Count / 2, label = add_commas(Count)),
+    color = "black",
+    size = 3.5,
+    angle = 90
+  ) +
+  geom_text(
+    data = long_counts %>% dplyr::filter(Mapping_Type == "multimapped"),
+    aes(
+      y = Count / 2 + (long_counts %>% 
+                         dplyr::filter(Mapping_Type == "uniquely_mapped") %>% 
+                         dplyr::pull(Count)),
+      label = add_commas(Count)
+    ),
+    color = "black",
+    size = 3.5,
+    angle = 90
+  ) +
+  scale_y_continuous(
+    labels = add_commas, 
+    expand = c(0, 0.05)
+  ) +
+  labs(x = "Sample", y = "Count", fill = "Alignment Type") +
+  scale_fill_manual(
+    values = c(
+      "uniquely_mapped" = "yellow",
+      "multimapped" = "lightblue"
+    ),
+    labels = c("uniquely_mapped" = "Uniquely aligned", "multimapped" = "Multiple alignments")
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Print the plot
+#print(gg_raw_count_aligned)
+
+#Save the plot
+ggsave(
+  gg_raw_count_aligned,
+  file = paste0(paths$output, "/Raw_Counts_Aligned_Threshold_Plot.pdf")
+)
 ```
 
-## Total reads mapped
+## Total reads aligned
 
 An absolute number of `r nmr_threshold`, representing 10% of the target sequencing depth, is used to separate outliers.
-
+Reasons for reads being alignable to the genome but not quantifiable include:
+- Reads that are aligned to the genome but do not map to the transcriptome; reads that do not map to any known annotated transcripts (e.g., intergenic regions, retained introns, non-coding regions, unannotated exons or novel splice variants).
+- Multi-mapping reads that map equally well to multiple transcripts in the transcriptome, and therefore cannot be assigned to a single transcript (i.e., are discarded or fractionally assigned. Possibly from gene fusion or overlapping gene annotations).
+- Incomplete or low-quality non-model reference genome annotations that do not include all transcripts & splice variants, or incorrect gene boundaries causing ambiguous multi-mapping.
+- Very short reads that may align to too many places in the genome, and thus can not be confidently assigned to a transcript.
 ```{r total_reads_mapped_plot, echo=FALSE, eval=TRUE, warning=FALSE, fig.height=8, fig.width=10, out.width='100%', out.height='100%'}
 print(gg_raw_count_aligned)
+```
+
+## Gene quantification statistics
+
+Reporting the number of reads that were successfully quantified (mapped to genes) and their percentage relative to aligned reads and total (filtered) reads.
+
+
+```{r Gene_Quantification_Stats, echo=FALSE, eval=TRUE, warning=FALSE, fig.height=8, fig.width=10, out.width='100%', out.height='100%'}
+# Calculate sum of counts for each sample from the gene count matrix
+quantified_reads_per_sample <- colSums(sampleData)
+
+# Create a data frame with the quantification stats
+quant_stats <- data.frame(
+  Sample = names(quantified_reads_per_sample),
+  quantified_reads = quantified_reads_per_sample,
+  stringsAsFactors = FALSE
+)
+
+# Clean up sample names if needed to match alignment data
+# You may need to adjust this depending on your sample naming conventions
+quant_stats$Sample <- gsub("^X", "", quant_stats$Sample)  # Remove X prefix if present
+quant_stats$Sample <- gsub("\\.[0-9]+$", "", quant_stats$Sample)  # Remove file extensions if present
+quant_stats$Sample <- gsub("_[12]$", "", quant_stats$Sample) # Then remove _1 or _2 at the end
+
+# Join with alignment data
+combined_stats <- align_map_qc_data %>%
+  dplyr::left_join(quant_stats, by = "Sample") %>%
+  dplyr::mutate(
+    # Percentage of aligned reads that were quantified
+    pct_quantified_of_aligned = (quantified_reads / total_mapped) * 100
+  )
+
+# Add percentage of total reads if your data has this information
+# Load the fastp filtered reads data to get total read counts
+fastp_path <- file.path(paths$reports, "multiqc_data", "fastp_filtered_reads_plot.txt")
+if (file.exists(fastp_path)) {
+  fastp_data <- read.delim(fastp_path, check.names = FALSE)
+  
+  # Calculate total reads (sum of all categories)
+  # Using regular if statement for a single value
+  if(is_paired) {
+    fastp_data <- fastp_data %>%
+      dplyr::mutate(`Passed Filter` = `Passed Filter` / 2) %>%
+      dplyr::mutate(`Low Quality` = `Low Quality` / 2) %>%
+      dplyr::mutate(`Too Many N` = `Too Many N` / 2) %>%
+      dplyr::mutate(`Too Short` = `Too Short` / 2) %>%
+      dplyr::mutate(total_raw_reads = `Passed Filter` + `Low Quality` + `Too Many N` + `Too Short`)
+  } else {
+    fastp_data <- fastp_data %>%
+      dplyr::mutate(total_raw_reads = `Passed Filter` + `Low Quality` + `Too Many N` + `Too Short`)
+  }
+  # Make sure Sample column is character for joining
+  fastp_data$Sample <- as.character(fastp_data$Sample)
+} else {
+  warning("Fastp filtered reads file not found at: ", fastp_path)
+  fastp_data <- NULL
+}
+
+# Join with alignment data
+combined_stats <- align_map_qc_data %>%
+  dplyr::left_join(quant_stats, by = "Sample")
+
+# Add total reads information if available
+if (!is.null(fastp_data)) {
+  combined_stats <- combined_stats %>%
+    dplyr::left_join(fastp_data %>% select(Sample, `Passed Filter`, total_raw_reads), by = "Sample") %>%
+    dplyr::mutate(
+      # Percentage of aligned reads that were quantified
+      pct_quantified_of_aligned = (quantified_reads / total_mapped) * 100,
+      # Percentage of passed filter reads that were quantified
+      pct_quantified_of_passed = (quantified_reads / `Passed Filter`) * 100,
+      # Percentage of total raw reads that were quantified
+      pct_quantified_of_total = (quantified_reads / total_raw_reads) * 100
+    )
+} else {
+  combined_stats <- combined_stats %>%
+    dplyr::mutate(
+      # Percentage of aligned reads that were quantified
+      pct_quantified_of_aligned = (quantified_reads / total_mapped) * 100
+    )
+  
+  # Add percentage of total reads if your data has this information from other sources
+  if ("Total" %in% colnames(align_map_qc_data) || exists("starqc") && "Total" %in% colnames(starqc)) {
+    combined_stats <- combined_stats %>%
+      dplyr::mutate(pct_quantified_of_total = (quantified_reads / Total) * 100)
+  } else if (align_quant_method %in% c("salmon", "kallisto")) {
+    combined_stats <- combined_stats %>%
+      dplyr::left_join(data %>% select(Sample, N_All.Reads), by = "Sample") %>%
+      dplyr::mutate(pct_quantified_of_total = (quantified_reads / N_All.Reads) * 100)
+  }
+}
+
+# Create a plot showing quantification rates as percentage of aligned reads
+gg_quantification <- ggplot(combined_stats, 
+                           aes(x = Sample, y = pct_quantified_of_aligned)) +
+  geom_bar(stat = "identity", fill = "darkgreen") +
+  geom_text(aes(label = sprintf("%.1f%%", pct_quantified_of_aligned)),
+            vjust = -0.5, size = 3.5) +
+  scale_y_continuous(limits = c(0, 100), 
+                     breaks = seq(0, 100, by = 10),
+                     expand = c(0, 10)) +
+  labs(x = "Sample", 
+       y = "Percentage of Aligned Reads",
+       title = "Percentage of Aligned Reads Mapped to Genes") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Create a plot showing quantification rates as percentage of total reads
+if (!is.null(fastp_data)) {
+  gg_total_quantification <- ggplot(combined_stats, 
+                                   aes(x = Sample, y = pct_quantified_of_total)) +
+    geom_bar(stat = "identity", fill = "steelblue") +
+    geom_text(aes(label = sprintf("%.1f%%", pct_quantified_of_total)),
+              vjust = -0.5, size = 3.5) +
+    scale_y_continuous(limits = c(0, 100), 
+                       breaks = seq(0, 100, by = 10),
+                       expand = c(0, 0)) +
+    labs(x = "Sample", 
+         y = "Percentage of Total Raw Reads",
+         title = "Percentage of Total Raw Reads Mapped to Genes") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+}
+
+# Create a plot showing raw quantified reads
+gg_quantified_counts <- ggplot(combined_stats, 
+                              aes(x = Sample, y = quantified_reads)) +
+  geom_bar(stat = "identity", fill = "darkgreen") +
+  geom_text(aes(label = add_commas(quantified_reads)),
+            angle = 90, hjust = -0.1, size = 3.5) +
+  labs(x = "Sample", 
+       y = "Number of Reads",
+       title = "Number of Reads Mapped to Genes") +
+  scale_y_continuous(labels = add_commas, expand = c(0, 0.05)) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Load SortMeRNA data to get rRNA filtering information
+sortmerna_path <- file.path(paths$reports, "multiqc_data", "multiqc_sortmerna.txt")
+if (file.exists(sortmerna_path)) {
+  sortmerna_data <- read.delim(sortmerna_path, check.names = FALSE)
+  
+  # Clean up the data (some samples may have empty rows)
+  sortmerna_data <- sortmerna_data %>%
+    filter(!is.na(total) & total > 0) %>%
+    dplyr::mutate(
+      Sample = gsub("^X", "", Sample),  # Remove X prefix if present
+      Sample = gsub("\\.[0-9]+$", "", Sample),  # Remove file extensions
+      Sample = gsub("_[12]$", "", Sample)  # Remove _1 or _2 at the end
+    )
+} else {
+  warning("SortMeRNA file not found at: ", sortmerna_path)
+  sortmerna_data <- NULL
+}
+
+# Modify the read journey plot to include rRNA filtering
+if (!is.null(fastp_data) && !is.null(sortmerna_data)) {
+  # Join the SortMeRNA data with our combined stats
+  combined_stats <- combined_stats %>%
+    dplyr::left_join(sortmerna_data %>% select(Sample, total, rRNA, non_rRNA), by = "Sample")
+  
+  # Adjust for paired-end reads if necessary
+  if (is_paired) {
+    # Double the alignment and quantification counts to match how other tools count reads
+    combined_stats <- combined_stats %>%
+      dplyr::mutate(
+        total_mapped = total_mapped * 2,
+        quantified_reads = quantified_reads * 2
+      )
+  }
+  
+  read_journey <- combined_stats %>%
+    dplyr::mutate(
+      reads_filtered_out = total_raw_reads - `Passed Filter`,
+      rRNA_filtered = rRNA,  # New category for rRNA reads
+      passed_not_aligned = non_rRNA - total_mapped,  # Adjust calculation to account for rRNA filtering
+      aligned_not_quantified = total_mapped - quantified_reads
+    ) %>%
+    dplyr::select(Sample, total_raw_reads, reads_filtered_out, rRNA_filtered, passed_not_aligned, aligned_not_quantified, quantified_reads) %>%
+    tidyr::pivot_longer(
+      cols = c(reads_filtered_out, rRNA_filtered, passed_not_aligned, aligned_not_quantified, quantified_reads),
+      names_to = "read_category",
+      values_to = "count"
+    ) %>%
+    dplyr::mutate(read_category = factor(read_category, 
+                                  levels = c("reads_filtered_out", "rRNA_filtered", "passed_not_aligned", 
+                                            "aligned_not_quantified", "quantified_reads")))
+  
+  # Rest of code remains the same
+  category_labels <- c(
+    "reads_filtered_out" = "Failed QC Filter", 
+    "rRNA_filtered" = "rRNA Removed",
+    "passed_not_aligned" = "Passed QC & rRNA Filter But Not Aligned", 
+    "aligned_not_quantified" = "Aligned But Not Quantified", 
+    "quantified_reads" = "Quantified"
+  )
+  
+  gg_read_journey <- ggplot(read_journey, aes(x = Sample, y = count, fill = read_category)) +
+    geom_bar(stat = "identity") +
+    scale_fill_manual(
+      values = c(
+        "reads_filtered_out" = "lightgray",
+        "rRNA_filtered" = "salmon",
+        "passed_not_aligned" = "lightpink",
+        "aligned_not_quantified" = "lightyellow",
+        "quantified_reads" = "darkgreen"
+      ),
+      labels = category_labels
+    ) +
+    labs(x = "Sample", 
+         y = "Number of Reads",
+         fill = "Read Category",
+         title = "Read Journey from Raw Sequencing to Quantification") +
+    scale_y_continuous(labels = add_commas) +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          legend.position = "bottom")
+}
+
+# Print the plots
+print(gg_quantification)
+
+# Print total reads quantification plot if available
+if (exists("gg_total_quantification")) {
+  print(gg_total_quantification)
+}
+
+print(gg_quantified_counts)
+
+# Print read journey plot if available
+if (exists("gg_read_journey")) {
+  print(gg_read_journey)
+}
+
+# Save the plots
+ggsave(
+  gg_quantification,
+  file = paste0(paths$output, "/Percentage_Quantified_Plot.pdf")
+)
+
+ggsave(
+  gg_quantified_counts,
+  file = paste0(paths$output, "/Raw_Counts_Quantified_Plot.pdf")
+)
+
+# Save additional plots if available
+if (exists("gg_total_quantification")) {
+  ggsave(
+    gg_total_quantification,
+    file = paste0(paths$output, "/Percentage_Total_Quantified_Plot.pdf")
+  )
+}
+
+if (exists("gg_read_journey")) {
+  ggsave(
+    gg_read_journey,
+    file = paste0(paths$output, "/Read_Journey_Plot.pdf"),
+    width = 12, height = 8
+  )
+}
 ```
 
 ## Dendrogram, all samples
@@ -807,7 +1263,7 @@ sort_hclust <- function(...)
 ############################################################################
 # Re-order the data by group
 ############################################################################
-flag_order <- order(d[treatment_var])
+flag_order <- order(d[[treatment_var]])
 d <- d[flag_order, ]
 sampleData <- sampleData[, flag_order]
 
@@ -1198,7 +1654,7 @@ print(pca_p)
 dev.off()
 cat("PCA Completed\n")
 
-#knitr::include_graphics(paste0(paths$output, "/PCA.pdf"))
+#include_safe_graphics(paste0(paths$output, "/PCA.pdf"))
 print(pca_p)
 ```
 
@@ -1347,7 +1803,7 @@ print(pca_p)
 dev.off()
 cat("PCA Colored by Dose Completed\n")
 
-#knitr::include_graphics(paste0(paths$output, "/PCA_dose.pdf"))
+#include_safe_graphics(paste0(paths$output, "/PCA_dose.pdf"))
 print(pca_p)
 
 filter_pca_variance <- function(scores, threshold = 20) {
@@ -1703,7 +2159,7 @@ plot(hcd, main = "Euclidean distance cluster dendrogram", ylab = "Height")
 dev.off()
 cat("Dendrogram Completed\n")
 
-#knitr::include_graphics(paste0(paths$output, "/dendrogram.pdf"))
+#include_safe_graphics(paste0(paths$output, "/dendrogram.pdf"))
 par(cex = 0.8)
 plot(hcd, main = "Euclidean distance cluster dendrogram", ylab = "Height")
 
@@ -1770,7 +2226,7 @@ if (!is.null(mu)) {
   dev.off()
   cat("Bar plot Completed\n")
   
-  knitr::include_graphics(paste0(paths$output, "/barplot_mapped_unmapped.pdf"))
+  include_safe_graphics(paste0(paths$output, "/barplot_mapped_unmapped.pdf"))
 }
 ```
 
@@ -1795,7 +2251,7 @@ QAQC <-
   data.frame(Sample = names(sampleData)) #Column names of count matrix/sampleData are the sample names
 
 QAQC <- QAQC %>%
-  dplyr::left_join(results_df %>% select(Sample, q30_after), by = "Sample") %>%
+  dplyr::left_join(results_df %>% dplyr::select(Sample, q30_after), by = "Sample") %>%
   dplyr::rename(q30 = q30_after)
 failed_q30 <- QAQC[QAQC$q30 < q30_cutoff * 100, ]
 
@@ -1823,7 +2279,7 @@ With a threshold cutoff of `r align_threshold*100`% difference between read1 and
 # DEFAULT: Reject > 0.25
 
 QAQC <- QAQC %>%
-  dplyr::left_join(results_df %>% select(Sample, diff_r1_r2_after), by = "Sample") %>%
+  dplyr::left_join(results_df %>% dplyr::select(Sample, diff_r1_r2_after), by = "Sample") %>%
   dplyr::rename(diff_r1_r2_q30 = diff_r1_r2_after)
 failed_diff_q30 <-
   QAQC[QAQC$diff_r1_r2_q30 > forward_reverse_q30_diff_cutoff * 100, ]
@@ -1848,9 +2304,9 @@ With a threshold cutoff of `r align_threshold*100`%
 ######################################################################################
 # Percentage Alignment
 ######################################################################################
-# Add starqc to QAQC object
+# Add align_map_qc_data to QAQC object
 QAQC <- QAQC %>%
-  dplyr::left_join(starqc %>% select(Sample, total_mapped_percent), by = "Sample") %>%
+  dplyr::left_join(align_map_qc_data %>% dplyr::select(Sample, total_mapped_percent), by = "Sample") %>%
   dplyr::rename(pct_mapped = total_mapped_percent)
 failed_alignment <- QAQC[QAQC$pct_mapped < align_threshold * 100, ]
 
@@ -1897,18 +2353,6 @@ if (nrow(failed_read_threshold) > 0) {
   print(flagged_samples)
 } else {
   print("No samples failed the NMR threshold.")
-}
-
-if (Platform == "TempO-Seq") {
-  print("TempO-Seq only... Under development")
-  # QAQC$pct_mapped <-
-  # failed_alignment_threshold <- QAQC[QAQC$pct_mapped < align_threshold,]
-  #
-  # # Samples failing
-  # print("Samples Flagged:")
-  # d %>%
-  #   dplyr::filter(original_names %in% failed_alignment_threshold$Sample) %>%
-  #   dplyr::pull(original_names)
 }
 
 ```
@@ -1961,7 +2405,7 @@ With a threshold cutoff of `r PCA_cutoff*100`%
 ######################################################################################
 # Add pca_filter_results to QAQC object
 QAQC <- QAQC %>%
-  dplyr::left_join(pca_filter_results %>% select(Sample, PC1_var, PC2_var), by = "Sample")
+  dplyr::left_join(pca_filter_results %>% dplyr::select(Sample, PC1_var, PC2_var), by = "Sample")
 failed_PC1 <- QAQC[QAQC$PC1_var > PCA_cutoff * 100, ]
 failed_PC2 <- QAQC[QAQC$PC2_var > PCA_cutoff * 100, ]
 
@@ -2082,7 +2526,7 @@ ref_correlations_all <- cor(as.matrix(cpm),
                             method = "pearson")
 
 correlation_df_all <- DESeqDesign %>%
-  filter(original_names %in% colnames(ref_correlations_all))
+  dplyr::filter(original_names %in% colnames(ref_correlations_all))
 
 rownames(correlation_df_all) <- correlation_df_all$original_names
 correlation_df_all <-
@@ -2128,7 +2572,7 @@ ref_correlations_samples <- cor(as.matrix(cpm %>%
                                 method = "pearson")
 
 correlation_df_samples <- DESeqDesign %>%
-  filter(original_names %in% colnames(ref_correlations_samples))
+  dplyr::filter(original_names %in% colnames(ref_correlations_samples))
 
 rownames(correlation_df_samples) <-
   correlation_df_samples$original_names
@@ -2215,7 +2659,7 @@ for (i in seq_along(facets)) {
   # Calculate correlations and prepare for heatmap
   correlations <- cor(cpm_subset, method = "pearson")
   correlation_df <- DESeqDesign %>%
-    filter(original_names %in% colnames(correlations))
+    dplyr::filter(original_names %in% colnames(correlations))
   
   row.names(correlation_df) <- correlation_df$original_names
   correlation_df <- correlation_df[colnames(correlations), ]
@@ -2240,9 +2684,9 @@ for (i in seq_along(facets)) {
   correlations <- as.data.frame(correlations)
   correlations$original_names <- row.names(correlations)
   cor_distribution <- correlations %>%
-    mutate(mean = rowMeans(across(where(is.numeric)))) %>%
+    dplyr::mutate(mean = rowMeans(across(where(is.numeric)))) %>%
     dplyr::select(mean, original_names) %>%
-    mutate(facet = facets[i])
+    dplyr::mutate(facet = facets[i])
   cor_list[[i]] <- cor_distribution
 }
 ```
@@ -2262,7 +2706,7 @@ cor_df1$original_names <- row.names(cor_df1)
 
 # Calculate the study-wide correlation means
 cor_distribution_all <- cor_df1 %>%
-  mutate(mean = rowMeans(across(where(is.numeric)))) %>%
+  dplyr::mutate(mean = rowMeans(across(where(is.numeric)))) %>%
   dplyr::select(mean, original_names)
 
 # Set dynamic lower limit for y-axis
@@ -2383,7 +2827,7 @@ for (treatment in unique(DESeqDesignExpSamples[[treatment_var]])) {
       # Calculate correlations for the current group
       correlations <- cor(cpm_subset, method = "pearson")
       correlation_df <- DESeqDesign %>%
-        filter(original_names %in% colnames(correlations))
+        dplyr::filter(original_names %in% colnames(correlations))
       
       row.names(correlation_df) <- correlation_df$original_names
       correlation_df <- correlation_df[colnames(correlations), ]
@@ -2392,9 +2836,9 @@ for (treatment in unique(DESeqDesignExpSamples[[treatment_var]])) {
       correlations <- as.data.frame(correlations)
       correlations$original_names <- row.names(correlations)
       cor_distribution <- correlations %>%
-        mutate(mean = rowMeans(across(where(is.numeric)))) %>%
+        dplyr::mutate(mean = rowMeans(across(where(is.numeric)))) %>%
         dplyr::select(mean, original_names) %>%
-        mutate(treatment = treatment, dose_n = dose_n)
+        dplyr::mutate(treatment = treatment, dose_n = dose_n)
       
       # Add the current group's data to the list
       cor_list_by_group[[paste(treatment, dose_n, sep = "_")]] <-
@@ -2467,7 +2911,7 @@ Note-Jory: Our datasets do not contain reference RNA
 #                          method = "pearson")
 
 #correlation_df <- DESeqDesign %>%
-#  filter(original_names %in% colnames(ref_correlations))
+#  dplyr::filter(original_names %in% colnames(ref_correlations))
 
 #row.names(correlation_df) <- correlation_df$original_names
 #correlation_df <- correlation_df[colnames(ref_correlations),]
@@ -2645,7 +3089,7 @@ if (nrow(QAQC_failed_logical) > 1) {
   )
   print(upset(fromList(upset_data_list)))
   dev.off()
-  knitr::include_graphics(file.path(paths$output, "upset_plot.png"))
+  include_safe_graphics(file.path(paths$output, "upset_plot.png"))
 } else {
   print("No samples failed QC. Skipping upset plot.")
 }
@@ -2658,11 +3102,21 @@ if (nrow(QAQC_failed_logical) > 1) {
 QAQC_annotated <- dplyr::left_join(DESeqDesign, QAQC_pass_fail, by = c("original_names" = "Sample")) %>%
   dplyr::right_join(QAQC, by = c("original_names" = "Sample"), suffix = c("", "_data"))
 
-# Create a new column 'Any' to indicate if any metric has failed
+# Create a new column 'Any' to indicate if any metric has failed, ignoring NAs
 QAQC_annotated$Any <- apply(
   QAQC_annotated,
   MARGIN = 1,
-  FUN = function(x) ifelse(any(x == "FAIL"), "FAIL", "PASS")
+  FUN = function(x) {
+    # Filter out NA values and only consider character/factor values
+    valid_values <- x[!is.na(x) & (is.character(x) | is.factor(x))]
+    
+    # Check if any valid value is "FAIL"
+    if (any(valid_values == "FAIL", na.rm = TRUE)) {
+      return("FAIL")
+    } else {
+      return("PASS")
+    }
+  }
 )
 
 # Generate vtree plots
@@ -2721,152 +3175,189 @@ Please note that in these pairwise plots, some relationships are meaningless (e.
 ```{r possible_covariates, fig.width = 11, fig.height = 10, out.height='100%', out.width='100%'}
 
 
-### Come back to this. How on earth can we automate this or make it generic!?
-### Add in n vectors... a list of vectors to loop over?
-### list(a,b,c) where a is ("row","column") ?
-### Common columns - vector of NMR_data, Ncov5_data, Nsig80_data, Gini_data
+# Define common metrics columns that should be included in all plots
+metrics_cols <- c(
+  "NMR_data", "Ncov5_data", "Nsig80_data", "Gini_data", 
+  "pct_mapped_data", "q30_data", "diff_r1_r2_q30_data", 
+  "PC1_var", "PC2_var"
+)
 
-QAQC_metadata_subset <- QAQC_annotated %>%
-  dplyr::select(
-    unlist(groups),
-    NMR_data,
-    Ncov5_data,
-    Nsig80_data,
-    Gini_data,
-    pct_mapped_data,
-    q30_data,
-    diff_r1_r2_q30_data,
-    PC1_var,
-    PC2_var
-  )
-
-# Summarize levels of each factor variable (checking for potential covariates)
-QAQC_metadata_subset %>%
-  summarise_each(levels(as.factor(.))) %>% tally()
-
-# Identify potential covariates with fewer than 24 unique levels
-potential_covariates <- QAQC_metadata_subset %>%
-  dplyr::mutate_all(as.factor) %>%
-  purrr::map(levels) %>%
-  purrr::map(length)
-
-covariate_names <-
-  names(potential_covariates[potential_covariates < 24])
-
-# Need a generic way to look for dose column...
-#QAQC_metadata_subset$Dose <- factor(log(QAQC_metadata_subset$Dose+1))
-
-# Generate pairwise plots using ggpairs, colored by the first group in the groups list
-for (i in seq_along(covariate_names)) {
-  ggpairs(
-    QAQC_metadata_subset,
-    cardinality_threshold = 24,
-    columns = c(
-      covariate_names,
-      "NMR_data",
-      "Ncov5_data",
-      "Nsig80_data",
-      "Gini_data",
-      "pct_mapped_data",
-      "q30_data",
-      "diff_r1_r2_q30_data",
-      "PC1_var",
-      "PC2_var"
-    ),
-    ggplot2::aes(colour = groups[[1]][1])
-  )
-}
-
-# Generate pairwise plots for each group in the groups list
-for (i in seq_along(groups)) {
-  group_comparison <- groups[[i]]
-  ggpairs(
-    QAQC_metadata_subset,
-    cardinality_threshold = 24,
-    columns = c(
-      unlist(group_comparison),
-      "NMR_data",
-      "Ncov5_data",
-      "Nsig80_data",
-      "Gini_data",
-      "pct_mapped_data",
-      "q30_data",
-      "diff_r1_r2_q30_data",
-      "PC1_var",
-      "PC2_var"
-    ),
-    ggplot2::aes(colour = groups[[1]][1])
-  )
-}
-if (length(groups) > 1 & !is.null(batch_var)) {
-  for (i in seq_along(groups)[2:length(groups)]) {
-    p <- ggpairs(
-      QAQC_metadata_subset,
-      cardinality_threshold = 24,
-      columns = c(
-        unlist(groups[[i]]),
-        "NMR_data",
-        "Ncov5_data",
-        "Nsig80_data",
-        "Gini_data",
-        "pct_mapped_data",
-        "q30_data",
-        "diff_r1_r2_q30_data",
-        "PC1_var",
-        "PC2_var"
-      ),
-      ggplot2::aes(colour = !!ensym(batch_var))
+# Wrap the entire section in tryCatch to ensure script continues
+tryCatch({
+  # Extract QAQC metadata as you had before
+  QAQC_metadata_subset <- QAQC_annotated %>%
+    dplyr::select(
+      unlist(groups),
+      NMR_data,
+      Ncov5_data,
+      Nsig80_data,
+      Gini_data,
+      pct_mapped_data,
+      q30_data,
+      diff_r1_r2_q30_data,
+      PC1_var,
+      PC2_var
     )
-    print(p)
-    ggsave(p, file = paste0(paths$output, "/Potential_covariates_plot.pdf"))
+
+  # Identify potential covariates with fewer than 24 unique levels
+  potential_covariates <- QAQC_metadata_subset %>%
+    dplyr::mutate_all(as.factor) %>%
+    purrr::map(levels) %>%
+    purrr::map(length)
+
+  covariate_names <-
+    names(potential_covariates[potential_covariates < 24])
+
+}, error = function(e) {
+  message("Error in data preparation: ", e$message)
+  # Create empty objects to prevent errors in subsequent code
+  QAQC_metadata_subset <<- data.frame()
+  covariate_names <<- character(0)
+})
+
+# Improved function with better error handling
+create_ggpairs_plot <- function(data, columns, color_var = NULL, output_file = NULL) {
+  # Exit early if data is empty
+  if(nrow(data) == 0 || ncol(data) == 0) {
+    message("Cannot create plot: Empty dataset")
+    return(NULL)
   }
-} else {
-  if (!is.null(batch_var)) {
-    p <- ggpairs(
-      QAQC_metadata_subset,
-      cardinality_threshold = 24,
-      columns = c(
-        unlist(groups),
-        "NMR_data",
-        "Ncov5_data",
-        "Nsig80_data",
-        "Gini_data",
-        "pct_mapped_data",
-        "q30_data",
-        "diff_r1_r2_q30_data",
-        "PC1_var",
-        "PC2_var"
-      ),
-      ggplot2::aes(colour = !!ensym(batch_var))
-    )
-    print(p)
-    ggsave(p, file = paste0(paths$output, "/Potential_covariates_plot.pdf"))
-  } else {
-    if (is.null(batch_var)) {
-      p <- ggpairs(
-        QAQC_metadata_subset,
-        cardinality_threshold = 24,
-        columns = c(
-          unlist(groups),
-          "NMR_data",
-          "Ncov5_data",
-          "Nsig80_data",
-          "Gini_data",
-          "pct_mapped_data",
-          "q30_data",
-          "diff_r1_r2_q30_data",
-          "PC1_var",
-          "PC2_var"
-        )
-      )
-      print(p)
-      ggsave(p,
-             file = paste0(paths$output, "/Potential_covariates_plot.pdf"))
+  
+  # Wrap everything in tryCatch
+  tryCatch({
+    # Filter to only include columns that exist in the data
+    valid_columns <- columns[columns %in% names(data)]
+    
+    if(length(valid_columns) == 0) {
+      message("No valid columns found for plotting")
+      return(NULL)
     }
-  }
+    
+    # Create the plot with or without color
+    if (!is.null(color_var) && color_var %in% names(data)) {
+      # Direct column reference for color
+      p <- ggpairs(
+        data,
+        cardinality_threshold = 24,
+        columns = valid_columns,
+        mapping = aes_string(color = color_var)
+      )
+    } else {
+      p <- ggpairs(
+        data,
+        cardinality_threshold = 24,
+        columns = valid_columns
+      )
+    }
+    
+    # Print and save if requested
+    tryCatch({
+      suppressWarnings(print(p))
+      if (!is.null(output_file)) {
+        suppressWarnings(ggsave(output_file, p, width = 10, height = 8))
+        message("Saved plot to: ", output_file)
+      }
+      return(p)
+    }, error = function(e) {
+      message("Error printing/saving plot: ", e$message)
+      return(NULL)
+    })
+  }, error = function(e) {
+    message("Error creating plot: ", e$message)
+    return(NULL)
+  })
 }
 
-#knitr::include_graphics(paste0(paths$output, "/Potential_covariates_plot.pdf"))
+# Make each plotting section fail independently
+# 1. Plot for each covariate
+tryCatch({
+  for (i in seq_along(covariate_names)) {
+    # Wrap each iteration in tryCatch
+    tryCatch({
+      cov_name <- covariate_names[i]
+      message("Creating plot for covariate: ", cov_name)
+      create_ggpairs_plot(
+        QAQC_metadata_subset,
+        columns = c(cov_name, metrics_cols),
+        color_var = groups[[1]][1]
+      )
+    }, error = function(e) {
+      message("Error in covariate plot #", i, ": ", e$message)
+    })
+  }
+}, error = function(e) {
+  message("Error in covariate plotting section: ", e$message)
+})
+
+# 2. Generate plots for each group
+tryCatch({
+  for (i in seq_along(groups)) {
+    tryCatch({
+      group_cols <- unlist(groups[[i]])
+      message("Creating plot for group: ", i)
+      create_ggpairs_plot(
+        QAQC_metadata_subset,
+        columns = c(group_cols, metrics_cols),
+        color_var = groups[[1]][1]
+      )
+    }, error = function(e) {
+      message("Error in group plot #", i, ": ", e$message)
+    })
+  }
+}, error = function(e) {
+  message("Error in group plotting section: ", e$message)
+})
+
+# 3. Handle batch variable if present
+tryCatch({
+  if (!is.null(batch_var) && batch_var %in% names(QAQC_metadata_subset)) {
+    # For each group beyond the first (if multiple groups)
+    if (length(groups) > 1) {
+      for (i in seq_along(groups)[2:length(groups)]) {
+        tryCatch({
+          message("Creating batch plot for group: ", i)
+          create_ggpairs_plot(
+            QAQC_metadata_subset,
+            columns = c(unlist(groups[[i]]), metrics_cols),
+            color_var = batch_var,
+            output_file = paste0(paths$output, "/Batch_group_", i, "_plot.pdf")
+          )
+        }, error = function(e) {
+          message("Error in batch group plot #", i, ": ", e$message)
+        })
+      }
+    }
+    
+    # Create plot with all groups colored by batch
+    tryCatch({
+      message("Creating final plot with batch coloring")
+      create_ggpairs_plot(
+        QAQC_metadata_subset,
+        columns = c(unlist(groups), metrics_cols),
+        color_var = batch_var,
+        output_file = paste0(paths$output, "/Potential_covariates_plot.pdf")
+      )
+    }, error = function(e) {
+      message("Error in final batch plot: ", e$message)
+    })
+  } else {
+    # Final plot without batch coloring
+    tryCatch({
+      message("Creating final plot without batch coloring")
+      create_ggpairs_plot(
+        QAQC_metadata_subset,
+        columns = c(unlist(groups), metrics_cols),
+        output_file = paste0(paths$output, "/Potential_covariates_plot.pdf")
+      )
+    }, error = function(e) {
+      message("Error in final plot: ", e$message)
+    })
+  }
+}, error = function(e) {
+  message("Error in batch variable section: ", e$message)
+})
+
+message("Plotting section completed - script will continue")
 
 ```
 
@@ -3003,11 +3494,11 @@ print(ggplatensig80)
 print(ggplatencov5)
 print(ggplategini)
 print(ggpplatefailed)
-#knitr::include_graphics(paste0(paths$output, "/PlatePosition_Mapped_reads_plot.pdf"))
-#knitr::include_graphics(paste0(paths$output, "/PlatePosition_NSig80_plot.pdf"))
-#knitr::include_graphics(paste0(paths$output, "/PlatePosition_NCov5_plot.pdf"))
-#knitr::include_graphics(paste0(paths$output, "/PlatePosition_Gini_plot.pdf"))
-#knitr::include_graphics(paste0(paths$output, "/PlatePosition_Samples_failing_filters_plot.pdf"))
+#include_safe_graphics(paste0(paths$output, "/PlatePosition_Mapped_reads_plot.pdf"))
+#include_safe_graphics(paste0(paths$output, "/PlatePosition_NSig80_plot.pdf"))
+#include_safe_graphics(paste0(paths$output, "/PlatePosition_NCov5_plot.pdf"))
+#include_safe_graphics(paste0(paths$output, "/PlatePosition_Gini_plot.pdf"))
+#include_safe_graphics(paste0(paths$output, "/PlatePosition_Samples_failing_filters_plot.pdf"))
 ```
 
 
@@ -3027,7 +3518,7 @@ knitr::kable(outlier_metadata,
 
 QAQC_failed_kable <- outlier_metadata %>%
   dplyr::select(original_names,!!ensym(treatment_var)) %>%
-  left_join(QAQC_failed, by = (c("original_names" = "Sample")))
+  dplyr::left_join(QAQC_failed, by = (c("original_names" = "Sample")))
 
 ```
 
@@ -3069,7 +3560,7 @@ QAQC_annotated %>%
     PC2_var,
     Any
   ) %>%
-  tally() %>%
+  dplyr::tally() %>%
   knitr::kable(caption = "Summary of pass/fail results") %>%
   kable_styling(
     bootstrap_options = "striped",
@@ -3101,7 +3592,7 @@ QAQC_annotated %>%
     Any,
     across(all_of(unlist(groups)))
   ) %>%
-  tally() %>%
+  dplyr::tally() %>%
   knitr::kable(caption = "Pass/fail results by group") %>%
   kable_styling(
     bootstrap_options = "striped",
@@ -3474,7 +3965,7 @@ ggdosegini <-
              linetype = "dotted",
              color = "red") +  # Add the Gini threshold line at 0.95
   geom_text(
-    data = QAQC_annotated %>% filter(Gini == "FAIL"),
+    data = QAQC_annotated %>% dplyr::filter(Gini == "FAIL"),
     # Filter for samples marked as FAIL
     aes(label = original_names, fill = factor(!!ensym(dose))),
     position = position_jitterdodge(
@@ -3512,7 +4003,7 @@ ggdosenmr <-
              linetype = "dotted",
              color = "red") +  # Add the threshold line for NMR data
   geom_text(
-    data = QAQC_annotated %>% filter(NMR == "FAIL"),
+    data = QAQC_annotated %>% dplyr::filter(NMR == "FAIL"),
     # Filter for samples below the threshold
     aes(label = original_names, fill = factor(!!ensym(dose))),
     position = position_jitterdodge(
@@ -3547,7 +4038,7 @@ ggdosencov5 <-
     )
   ) +  # Jittered points with fill color by dose, clustered by dose group
   geom_text(
-    data = QAQC_annotated %>% filter(Ncov5 == "FAIL"),
+    data = QAQC_annotated %>% dplyr::filter(Ncov5 == "FAIL"),
     # Filter for samples marked as FAIL
     aes(label = original_names, fill = factor(!!ensym(dose))),
     position = position_jitterdodge(
@@ -3585,7 +4076,7 @@ ggdosensig80 <-
     )
   ) +  # Jittered points with fill color by dose, clustered by dose group
   geom_text(
-    data = QAQC_annotated %>% filter(Nsig80 == "FAIL"),
+    data = QAQC_annotated %>% dplyr::filter(Nsig80 == "FAIL"),
     # Filter for samples marked as FAIL
     aes(label = original_names, fill = factor(!!ensym(dose))),
     position = position_jitterdodge(
@@ -3627,7 +4118,7 @@ ggdoseq30 <-
              linetype = "dotted",
              color = "red") +  # Add threshold line
   geom_text(
-    data = QAQC_annotated %>% filter(q30 == "FAIL"),
+    data = QAQC_annotated %>% dplyr::filter(q30 == "FAIL"),
     # Filter for samples below the Q30 threshold
     aes(label = original_names, fill = factor(!!ensym(dose))),
     position = position_jitterdodge(
@@ -3666,7 +4157,7 @@ ggdoseq30diff <-
              linetype = "dotted",
              color = "red") +  # Add threshold line
   geom_text(
-    data = QAQC_annotated %>% filter(diff_r1_r2_q30 == "FAIL"),
+    data = QAQC_annotated %>% dplyr::filter(diff_r1_r2_q30 == "FAIL"),
     # Filter for samples below the Q30 difference threshold
     aes(label = original_names, fill = factor(!!ensym(dose))),
     position = position_jitterdodge(
@@ -3712,7 +4203,7 @@ ggdosepctmapped <-
              linetype = "dotted",
              color = "red") +  # Add threshold line at 70%
   geom_text(
-    data = QAQC_annotated %>% filter(pct_mapped == "FAIL"),
+    data = QAQC_annotated %>% dplyr::filter(pct_mapped == "FAIL"),
     # Filter for samples below the percentage mapped threshold
     aes(label = original_names, fill = factor(!!ensym(dose))),
     position = position_jitterdodge(
@@ -3756,7 +4247,7 @@ ggdosepc1var <-
              linetype = "dotted",
              color = "red") +  # Add threshold line at 20%
   geom_text(
-    data = QAQC_annotated %>% filter(PC1_var == "FAIL"),
+    data = QAQC_annotated %>% dplyr::filter(PC1_var == "FAIL"),
     # Filter for samples below the PC1 variance threshold
     aes(label = original_names, fill = factor(!!ensym(dose))),
     position = position_jitterdodge(
@@ -3820,7 +4311,7 @@ print(ggdosenmr)
 
 ### PC1 variance
 
-```{plot_chemical_differences_NMR, fig.width = 11, fig.height = 10, out.height='100%', out.width='100%', eval=any(grepl("dose", colnames(QAQC_annotated), ignore.case = T))}
+```{r plot_chemical_differences_PC1, fig.width = 11, fig.height = 10, out.height='100%', out.width='100%', eval=any(grepl("dose", colnames(QAQC_annotated), ignore.case = T))}
 print(ggdosepc1var)
 ```
 
@@ -4042,7 +4533,7 @@ print(ggnmr)
 
 ### PC1 variance
 
-```{plot_filtered_NMR, fig.width = 11, fig.height = 10, out.height='100%', out.width='100%', eval=any(grepl("dose", colnames(QAQC_annotated), ignore.case = T))}
+```{r plot_filtered_PC1, fig.width = 11, fig.height = 10, out.height='100%', out.width='100%', eval=any(grepl("dose", colnames(QAQC_annotated), ignore.case = T))}
 print(ggpc1var)
 ```
 

@@ -27,7 +27,7 @@ print(paste("config params projectdir:", config$params$projectdir))
 print(paste("config params project_name:", config$params$project_name))
 #print(paste("config params Platform:", config$params$Platform))
 
-title <- paste('Study-wide sample quality control:', gsub(pattern = '_', replacement = ' ', x = config$params$project_name))
+title <- paste('Study-wide sample quality control:', gsub(pattern = '_', replacement = ' ', x = config$params$project_name), ' - ', Sys.getenv('ALIGN_QUANT_METHOD'))
 
 print(paste("Title:", title))
 

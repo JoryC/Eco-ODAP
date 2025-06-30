@@ -2,11 +2,12 @@
 params:
   projectdir: !expr paste0("/mnt/", Sys.getenv("STUDY_ID_DIR"))
   project_name: !expr Sys.getenv("STUDY_ID_DIR")
-  species: "zebrafish"                 # one of human, mouse, rat, hamster
+  countmatdir: !expr paste0("/mnt/", Sys.getenv("STUDY_ID_DIR"), "/output/", Sys.getenv("ALIGN_QUANT_METHOD"))
+  species: "daphnia"                # one of human, mouse, rat, hamster, zebrafish, rainbowtrout, chinesemedaka, fatheadminnow, daphnia or algae
   design: "Dose"                # single experimental group of interest; entries in this column must match the contrast names.
   intgroup: ["Dose"]            # experimental group of interest plus covariates; can be more than one
   dose: "Dose"
-  nmr_threshold: 3000000 # 10% of 1M reads for TempOSeq = 100,000; 10% of 10M reads for RNA-Seq = 1,000,000.
+  nmr_threshold: 25 # 10% of 1M reads for TempOSeq = 100,000; 10% of 10M reads for RNA-Seq = 1,000,000.
   fdr_threshold: 0.05 # false-disocvery rate cutoff for DEGs. Default to  0.01, but should probably relax to 0.05...
   linear_fc_filter: 1.5 # The linear fold-change filter for DEGs.
   MinCount: 1 #Should be default 1 for regular RNA-Seq data and 0.5 for something like TempO-Seq or a reduced transcriptome

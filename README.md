@@ -157,6 +157,10 @@ Apptainer> conda env list #Check that new environment was installed correctly
 ```
 #### Option 2 - If you built the apptainer from the provided Dockerfile or package
 
+### Installing Nextflow on DRAC
+
+Follow the guidelines on the [AllianceCan wiki](https://docs.alliancecan.ca/wiki/Nextflow)
+
 ### Configuration and inputs
 
 There are a number of inputs that are necessary to run the pipeline:
@@ -165,6 +169,7 @@ There are a number of inputs that are necessary to run the pipeline:
 - Reference genome file
 - Reference genome annotation file
 - The custom annotations file
+- Nextflow nf-core/rnaseq input file. See [usage](https://nf-co.re/rnaseq/3.18.0/docs/usage/)
 
 And various configurations that need to be adjusted:
 - config.yml
@@ -173,8 +178,11 @@ And various configurations that need to be adjusted:
 - Paramaters in the YAML header of R-ODAF_2_Sample_QC.rmd
 - Paramaters in the YAML header of R-ODAF_3_DESeq2_report.rnaseq.Rmd
 - Paramaters in the YAML header of BMD_and_tPOD_calculation.Rmd
+- nf-params.json
+- (optional) custom nf-core/rnaseq configurations (.config files)
+- (optional) custom multiqc report configurations (custom_multiqc_config.yaml)
 
-Please note that the params in the config YAML files should match the params in the headers of the params in the R markdown files.
+Please note that the params in the config YAML files should match the params in the headers of the params in the matching R markdown files.
 
 #### Metadata
 A sample of what the metadata can look like is shown in the default `/SraRunTable.csv` metadata file which mimics what metaadata would look like if downloaded from the NCBI GEO database. The essential columns are:
@@ -205,9 +213,9 @@ N = some arbitrary study id number (e.g., 1),
 Compound = the name of the compound, chemical or treatment used in the experiment (e.g., PFOS) and,
 n = the duration of exposure in number of days (e.g., 1).
 
-WARNING: Some of the scripts use this specific naming convention template to parse the directory name for specific paramaters such as the Compound which can be seen on line 104 of `/Study_id_N_Compound_n_day_exposure/Rmd/R-ODAF_2_Sample_QC.rmd': 
+WARNING: Some of the scripts use this specific naming convention template to parse the directory name for specific paramaters such as the Compound which can be seen on line 134 of `/Study_id_N_Compound_n_day_exposure/Rmd/R-ODAF_2_Sample_QC.rmd': 
 ```
-104 chemical_name <- sub("^.*Study_id_\\d+_([^_]+)_\\d+(\\.\\d+)?_day_exposure$", "\\1", projectdir)
+134 chemical_name <- sub("^.*Study_id_\\d+_([^_]+)_\\d+(\\.\\d+)?_day_exposure$", "\\1", projectdir)
 ```
 
 #### Reference genome files
@@ -234,6 +242,17 @@ File naming should be as follows:
 - Single-end data - `{Run}.fastq.gz`
 - Paired-end data - `{Run}{suffix1}.fastq.gz and {Run}{suffix2}.fastq.gz`. 
   - Suffixes can be any typical suffix such as ".R1 and .R2" or "_1 and _2", for example. Suffixes for paired-end data must be defined in the configuration of `submit_R_ODAF_job_1.sh` or `submit_R_ODAF_job_1_array.sh` if submitting jobs through SLURM, or the header of `R-ODAF_1_sequencing_DataPreProcess.sh` if not.
+
+#### Generating the required nextflow samplesheet
+To easily create the required metadata input for nextflow, navigate to the source directory of `generate_nf_sample_sheet.sh` and execute the tool. For help try executing:
+```
+bash generate_nf_sample_sheet.sh --help
+```
+There must be raw fastq.gz or .fastq files present in the raw directory in order to execute this tool.
+
+#### Rendering the multiqc report
+By default the nf-params.json setting: `"skip_multiqc"` is set to `true`.
+However, running multiqc creates necessary outputs for the `Sample_QC` report. In order to execute multiqc and create necessary outputs in the correct directory, submit the job `render_multiqc_report.sh` file to manually inititate the render.
 
 ## Outputs
 

@@ -73,6 +73,36 @@ if (species == "fatheadminnow") {
   ensembl_species <- "pimephales_promelas_gene_ensembl"
   species_gene_symbol <- "external_gene_name"
 }
+##################
+# Daphnia Magna   # tested
+##################
+#daphnia
+if (species == "daphnia") {
+  # Connect to Ensembl Metazoa and list marts
+  marts <- listMarts(host = "https://metazoa.ensembl.org")
+  metazoa_mart <- as.character(marts[[1]][1])
+  dataset_list <- useMart(metazoa_mart, host = "https://metazoa.ensembl.org")
+  dataset_list <- listDatasets(dataset_list)
+  ensembl_species <- "dmgca020631705v2_eg_gene" # Daphnia Magna Ensembl dataset
+  ensembl <- useMart(metazoa_mart, dataset = ensembl_species, host = "https://metazoa.ensembl.org")
+  attributes <- listAttributes(ensembl)
+  species_gene_symbol <- "external_gene_name" # Daphnia Magna uses the same attribute for gene symbols
+}
+#####################################
+# Algae (Chlamydomonas_reinhardtii) # tested
+#####################################
+#algae
+if (species == "algae") {
+  # Connect to Ensembl plants and list marts
+  marts <- listMarts(host = "https://plants.ensembl.org")
+  plant_mart <- as.character(marts[[1]][1])
+  dataset_list <- useMart(plant_mart, host = "https://plants.ensembl.org")
+  dataset_list <- listDatasets(dataset_list)
+  ensembl_species <- "creinhardtii_eg_gene" # Algae Ensembl dataset
+  ensembl <- useMart(plant_mart, dataset = ensembl_species, host = "https://plants.ensembl.org")
+  attributes <- listAttributes(ensembl)
+  species_gene_symbol <- "external_gene_name" # Algae uses the same attribute for gene symbols
+}
 #############################################
 
 # species <- if_else(
@@ -114,6 +144,129 @@ if (!species %in% c("rainbowtrout", "chinesemedaka", "fatheadminnow")) {
 #genes <- lapply(resListAll,
 #                function(x) row.names(as.data.frame(x)))
 #genes <- unlist(genes) %>% unique()
+
+if (species == "daphnia") {
+  gtf_file <- mygtffile
+  # Import the GFF/GTF file
+  annotations <- import(gtf_file)
+  
+  # Convert annotations to a data frame
+  annotations_df <- as.data.frame(annotations) %>%
+    mutate(prefix = sub("_.*", "", transcript_id))
+  
+  #Count occurences of each prefix
+  prefix_counts <- annotations_df %>%
+    group_by(prefix) %>%
+    summarize(count = n())
+  
+  genes <- annotations_df %>%
+    dplyr::pull(gene_id) %>%
+    unique()
+  #SOME OF THE DAPHNIA GENE NAMES DON'T MATCH EXCACTLY WIOTH WHAT IS IN BIOMART SO I AM MANIPULATING THE GENE ID STRINGS TO MATCH THE BIOMART ENTRIES SO WE CAN GET THE FULL LIST OF ANNOTATED GENES.
+  # Function to change only the specific pattern
+  fix_trna_names <- function(gene_names) {
+    # Only modify names that match the Trna pattern with underscore
+    trna_pattern <- "^Trna.*-.*_[0-9]+$"
+    
+    # Find which genes match the pattern
+    matches <- grepl(trna_pattern, gene_names)
+    
+    # For matching genes, replace underscore with hyphen
+    gene_names[matches] <- gsub("_([0-9]+)$", "-\\1", gene_names[matches])
+    
+    return(gene_names)
+  }
+  
+  # Usage
+  corrected_gene_names <- fix_trna_names(genes)
+  
+  id_table_entrez <- getBM(
+    #filters = biomart_filter,
+    attributes = c(
+      biomart_filter,
+      species_gene_symbol,
+      "description",
+      "entrezgene_id",
+      "entrezgene_accession"
+    ),
+    values = corrected_gene_names, #genes/all the genes in the genome
+    mart = ensembl
+  )
+  
+  fix_trna_names <- function(gene_names) {
+    # Only modify names that match the Trna pattern with underscore
+    trna_pattern <- "^Trna.*-.*-[0-9]+$"
+    
+    # Find which genes match the pattern
+    matches <- grepl(trna_pattern, gene_names)
+    
+    # For matching genes, replace underscore with hyphen
+    gene_names[matches] <- gsub("-([0-9]+)$", "_\\1", gene_names[matches])
+    
+    return(gene_names)
+  }
+  
+  id_table_entrez <- id_table_entrez %>%
+    mutate(ensembl_gene_id = if_else(stringr::str_starts(ensembl_gene_id, "GeneID"), external_gene_name, ensembl_gene_id)) %>%
+    mutate(ensembl_gene_id = fix_trna_names(ensembl_gene_id))
+  
+  #############################################################################
+  #Drosophilla homologues
+  id_table_entrez <- getBM(
+    #filters = biomart_filter,
+    attributes = c(
+      biomart_filter,
+      species_gene_symbol,
+      "description",
+      "dmelanogaster_eg_homolog_ensembl_gene",
+      "dmelanogaster_eg_homolog_associated_gene_name"
+    ),
+    values = corrected_gene_names, #genes/all the genes in the genome
+    mart = ensembl
+  )
+  
+  id_table_entrez <- id_table_entrez %>%
+    unique()
+  
+  readr::write_csv(id_table_entrez, "./daphnia_annotated_id_table_entrez_wholegenome.csv")
+}
+
+if (species == "algae") {
+  gtf_file <- mygtffile
+  # Import the GFF/GTF file
+  annotations <- import(gtf_file)
+  
+  # Convert annotations to a data frame
+  annotations_df <- as.data.frame(annotations) %>%
+    mutate(prefix = sub("_.*", "", transcript_id))
+  
+  #Count occurences of each prefix
+  prefix_counts <- annotations_df %>%
+    group_by(prefix) %>%
+    summarize(count = n())
+  
+  genes <- annotations_df %>%
+    dplyr::pull(gene_id) %>%
+    unique()
+  
+  id_table_entrez <- getBM(
+    #filters = biomart_filter,
+    attributes = c(
+      biomart_filter,
+      species_gene_symbol,
+      "description",
+      "entrezgene_id",
+      "entrezgene_accession"
+    ),
+    values = genes, #genes/all the genes in the genome
+    mart = ensembl
+  )
+  
+  id_table_entrez <- id_table_entrez %>%
+    unique()
+  
+  readr::write_csv(id_table_entrez, "./algae_annotated_id_table_entrez_wholegenome.csv")
+}
 
 if (species %in% c("zebrafish", "hamster", "rat", "mouse", "human")) {
   ############################################################
@@ -830,7 +983,7 @@ if (Platform == "RNA-Seq") {
 }
 
 
-if (any(species %in% c("zebrafish", "rainbowtrout", "hamster", "rat", "mouse", "human", "chinesemedaka")) & Platform == "RNA-Seq") {
+if (any(species %in% c("zebrafish", "rainbowtrout", "hamster", "rat", "mouse", "human", "chinesemedaka", "daphnia", "algae")) & Platform == "RNA-Seq") {
   
   if (file.exists(normalizePath(file.path(paths$RData, "id_table.RData"))) & params$use_cached_RData == TRUE) {
     

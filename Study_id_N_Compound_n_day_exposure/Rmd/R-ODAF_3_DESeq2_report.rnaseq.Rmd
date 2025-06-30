@@ -2,11 +2,12 @@
 params:
   projectdir: !expr paste0("/mnt/", Sys.getenv("STUDY_ID_DIR"))
   project_name: !expr Sys.getenv("STUDY_ID_DIR")
-  species: "zebrafish"                # one of human, mouse, rat, hamster, zebrafish, rainbowtrout, chinesemedaka, fatheadminnow
+  countmatdir: !expr paste0("/mnt/", Sys.getenv("STUDY_ID_DIR"), "/output/", Sys.getenv("ALIGN_QUANT_METHOD"))
+  species: "daphnia"                # one of human, mouse, rat, hamster, zebrafish, rainbowtrout, chinesemedaka, fatheadminnow, daphnia, or algae
   design: "Dose"             # single experimental group of interest; entries in this column must match the contrast names.
   intgroup: ["Dose"]           # experimental group of interest plus covariates; can be more than one
   dose: "Dose"
-  nmr_threshold: 1000000 # 10% of 1M reads for TempOSeq = 100,000; 10% of 10M reads for RNA-Seq = 1,000,000.
+  nmr_threshold: 25 # 10% of 1M reads for TempOSeq = 100,000; 10% of 10M reads for RNA-Seq = 1,000,000.
   fdr_threshold: 0.05 # false-disocvery rate cutoff for DEGs. Default to  0.01, but should probably relax to 0.05...
   linear_fc_filter: 1.5 # The linear fold-change filter for DEGs.
   MinCount: 1 #Should be default 1 for regular RNA-Seq data and 0.5 for something like TempO-Seq or a reduced transcriptome
@@ -21,7 +22,7 @@ params:
   include_only_column:  !expr NA # Restrict analysis to group(s) in the column listed here based on params$include_only_group.
   include_only_group:  !expr NA # Restrict analysis to this/these group(s) within the column listed in params$include_only_column
   use_cached_RData: FALSE # If possible, load the saved RData for dds object and gene IDs
-  cpus: !expr as.numeric(Sys.getenv('SLURM_CPUS_PER_TASK')) # Set to a lower number (e.g., 2 to 4) if you aren't working in a server environment
+  cpus: !expr as.integer(Sys.getenv('SLURM_CPUS_PER_TASK')) # Set to a lower number (e.g., 2 to 4) if you aren't working in a server environment
   run_pathway_analysis: FALSE # Optionally disable pathway analysis if not available for your organism
   wikipathways_directory: !expr NA
   biospyder_dbs: !expr NA
@@ -39,7 +40,7 @@ output:
     theme: spacelab           # flatly spacelab sandstone cerulean
     code_download: true
 bibliography: "`r file.path('/mnt', Sys.getenv('STUDY_ID_DIR'), 'Rmd', 'references.bib')`"
-title: "`r paste('Transcriptome analysis:', gsub(pattern = '_', replacement = ' ', x = Sys.getenv('STUDY_ID_DIR')))`"
+title: "`r paste('Transcriptome analysis:', gsub(pattern = '_', replacement = ' ', x = Sys.getenv('STUDY_ID_DIR')), ' - ', Sys.getenv('ALIGN_QUANT_METHOD'))`"
 author: "Jory Curry"
 ---
 
@@ -77,13 +78,14 @@ This report is meant to help explore DESeq2 results and was generated using RMar
 
 ```{r params_define_in_testing, message=F, warnings=F, echo=F, eval=F}
 params <- list()
-params$projectdir="/mnt/Study_id_50_PFBS_4.83_day_exposure"
-params$project_name="Study_id_50_PFBS_4.83_day_exposure"
-params$species="zebrafish"
+params$projectdir=paste0("/mnt/", Sys.getenv("STUDY_ID_DIR"))
+params$project_name=Sys.getenv("STUDY_ID_DIR")
+params$countmatdir=paste0("/mnt/", Sys.getenv("STUDY_ID_DIR"), "/output/", Sys.getenv("ALIGN_QUANT_METHOD"))
+params$species="rat"
 params$dose="Dose"
 params$design="Dose"
 params$intgroup=c("Dose")
-params$nmr_threshold=3000000
+params$nmr_threshold=25
 params$linear_fc_filter=1.5
 params$fdr_threshold=0.05
 params$MinCount=1
@@ -123,7 +125,8 @@ paths$root <- "/mnt"
 paths$data <- projectdir
 paths$raw <- normalizePath(file.path(paths$data, "raw"))
 paths$output <- normalizePath(file.path(paths$data, "output"))
-paths$processed <- normalizePath(file.path(paths$output, "Trimmed_reads", "RSEM")) #This directory should be contain the count table output by R-ODAF_1_sequencing_DataPreprocess...
+count_matrix_dir <- params$countmatdir # This directory should be contain the count table output by R-ODAF_1_sequencing_DataPreprocess...
+paths$processed <- count_matrix_dir #This directory should be contain the count table output by R-ODAF_1_sequencing_DataPreprocess...
 paths$metadata <- normalizePath(file.path(paths$root)) #Back to GSE Accession ID parent directory that contains the metadata file, e.g., normalizePath(file.path(paths$root, ".."))
 # Need to update this path... temporary for testing purposes
 paths$reports <- normalizePath(file.path(paths$data, "reports"))
@@ -229,6 +232,7 @@ startTime <- Sys.time()
 #  - r-sessionInfo
 #  - r-viridis
 #  - r-dendextend
+#  - r-ashr
 #  - bioconductor-deseq2
 #  - bioconductor-limma
 #  - bioconductor-enrichplot
@@ -249,36 +253,38 @@ library('kableExtra')
 library('tidyverse')
 library('magrittr')
 library('ggplot2')
-library('DT')                         
+library('DT')
 library('data.table')
 library('pheatmap')
 library('lattice')
-library('tidytext')                   
-library('openxlsx')                   
+library('tidytext')
+library('openxlsx')
 library('RColorBrewer')
 library('rentrez')
 library('viridis')
-library('sessioninfo')                
-library('plotly')                     
+library('sessioninfo')
+library('plotly')
 library('dendextend')
 #library('RMariaDB')
 
 # Bioinformatics-specific
 library('DESeq2')
+library('ashr')
 library('limma')
 library('edgeR')
-library('enrichplot')                 
+library('enrichplot')
 library('rWikiPathways')
-library('rtracklayer')              
+library('rtracklayer')
 library('BiocParallel')
-library('clusterProfiler')            
-library('biomaRt')                    
-library('AnnotationHub')              
-library('vsn')                        
+library('clusterProfiler')
+library('biomaRt')
+library('AnnotationHub')
+library('vsn')
 
 # Load genome, depends on species
 # To add: Zebrafish, Folsomia candida, others?
 species <- params$species
+
 if (species == "human") {
   # Human:
   library('org.Hs.eg.db')
@@ -288,60 +294,62 @@ if (species == "human") {
   ensembl_species <- "hsapiens_gene_ensembl"
   species_gene_symbol <- "external_gene_name"
   kegg_organism <- "hsa"
-  temposeq_manifest <- "191113_Human_S1500_Surrogate_2.0_Manifest.csv" # options: "191113_Human_S1500_Surrogate_2.0_Manifest.csv" "191004_Human_Whole_Transcriptome_2.0_Manifest.txt"
+  temposeq_manifest <- "191113_Human_S1500_Surrogate_2.0_Manifest.csv" 
+  # options: "191113_Human_S1500_Surrogate_2.0_Manifest.csv" 
+  #          "191004_Human_Whole_Transcriptome_2.0_Manifest.txt"
+  
+} else if (species == "mouse") {
+  # Mouse:
+  ensembl_species <- "mmusculus_gene_ensembl"
+  species_gene_symbol <- "mgi_symbol"
+  temposeq_manifest <- "100771_mus_musculus_wt_1.1_manifest_revB_2024.csv"
+  
+} else if (species == "rat") {
+  # Rat: 
+  species_gene_symbol <- "external_gene_name"
+  ensembl_species <- "rnorvegicus_gene_ensembl"
+  
+} else if (species == "hamster") {
+  # Golden hamster:
+  OrgDb.Ma <- query(AnnotationHub(), c("OrgDb", "Mesocricetus auratus"))[[1]]
+  orgdb <- "OrgDb.Ma"
+  species_sci <- "Mesocricetus auratus"
+  ensembl_species <- "mauratus_gene_ensembl"
+  species_gene_symbol <- "external_gene_name"
+  
+} else if (species == "zebrafish") {
+  # Zebrafish
+  ensembl_species <- "drerio_gene_ensembl"
+  species_gene_symbol <- "external_gene_name"
+  
+} else if (species == "rainbowtrout") {
+  # Rainbow Trout
+  ensembl_species <- "omykiss_gene_ensembl"
+  species_gene_symbol <- "external_gene_name"
+  
+} else if (species == "chinesemedaka") {
+  # Chinese medaka
+  ensembl_species <- "osinensis_gene_ensembl"
+  species_gene_symbol <- "external_gene_name"
+  
+} else if (species == "fatheadminnow") {
+  # Fathead minnow
+  print("BioMart not available")
+  print("This script likely needs to be updated before it is able to run")
+  species_gene_symbol <- "external_gene_name"
+  
+} else if (species == "daphnia") {
+  # Daphnia magna
+  ensembl_species <- "dmgca020631705v2_eg_gene"
+  species_gene_symbol <- "external_gene_name"
+
+} else if (species == "algae") {
+ # Algae
+ ensembl_species <- "creinhardtii_eg_gene"
+ species_gene_symbol <- "external_gene_name"
+
 } else {
-  if (species == "mouse") {
-    # Mouse:
-	ensembl_species <- "mmusculus_gene_ensembl"
-	species_gene_symbol <- "mgi_symbol"
-	temposeq_manifest <- "100771_mus_musculus_wt_1.1_manifest_revB_2024.csv"
-} else {
-  if (species == "rat") {
-    # Rat: 
-    library('org.Rn.eg.db')
-    orgdb <- "org.Rn.eg.db"
-    species_sci <- "Rattus norvegicus"
-    wiki <- "wikipathways-20210610-gmt-Rattus_norvegicus.gmt"
-    ensembl_species <- "rnorvegicus_gene_ensembl"
-    species_gene_symbol <- "rgd_symbol"
-    kegg_organism <- "rno"
-    temposeq_manifest <- "190809 Rat Whole Transcriptome 1.0 Manifest.xlsx"
-} else {
-  if (species == "hamster") {
-    # Golden hamster:
-    OrgDb.Ma <- query(AnnotationHub(), c("OrgDb", "Mesocricetus auratus"))[[1]]
-    orgdb <- "OrgDb.Ma"
-    species_sci <- "Mesocricetus auratus"
-    ensembl_species <- "mauratus_gene_ensembl"
-    species_gene_symbol <- "external_gene_name"
-} else {
-    if (species == "zebrafish") {
-      # Zebrafish
-      ensembl_species <- "drerio_gene_ensembl"
-      species_gene_symbol <- "external_gene_name"
-} else {
-    if (species == "rainbowtrout") {
-      # Rainbow Trout
-      ensembl_species <- "omykiss_gene_ensembl"
-      species_gene_symbol <- "external_gene_name"
-} else {
-    if (species == "chinesemedaka") {
-      ensembl_species <- "osinensis_gene_ensembl"
-      species_gene_symbol <- "external_gene_name"
-} else {
-    if (species == "fatheadminnow") {
-      print("BioMart not available")
-      print("This script likely needs to be updated before it is able to run")
-      species_gene_symbol <- "external_gene_name"
-} else {
-    message("No species picked!")
-}
-}
-}
-}
-}
-}
-}
+  message("Species not currently supported")
 }
 
 # Options
@@ -467,7 +475,7 @@ if (all(grepl("_1$", colnames(sampleData)))) {
 if (!is.na(params$group_facet)) {
   contrasts_to_filter <- DESeqDesign %>%
   dplyr::filter(!!sym(params$group_facet) %in% params$group_filter) %>% # NOTE: Not sure if %in% or == is better here.
-  pull(params$design) %>% 
+  dplyr::pull(params$design) %>% 
   unique()
   contrasts <- contrasts %>% dplyr::filter(V1 %in% contrasts_to_filter)
   if (params$strict_contrasts == T) {
@@ -482,7 +490,7 @@ if (any(!is.na(params$exclude_groups))) {
   DESeqDesign <- DESeqDesign %>% dplyr::filter(!(!!sym(params$design)) %in% params$exclude_groups)
   contrasts_to_filter <- DESeqDesign %>% 
   dplyr::filter(!(!!sym(params$design)) %in% params$exclude_groups) %>%
-  pull(params$design) %>% 
+  dplyr::pull(params$design) %>% 
   unique()
   contrasts <- contrasts %>% dplyr::filter(V1 %in% contrasts_to_filter)
   if (params$strict_contrasts == T) {
@@ -493,7 +501,7 @@ if (!is.na(params$include_only_column) & !is.na(params$include_only_group)) {
   DESeqDesign <- DESeqDesign %>%
     dplyr::filter((!!sym(params$include_only_column)) %in% params$include_only_group)
   limit_contrasts <- DESeqDesign %>%
-    pull(!!sym(params$design)) %>%
+    dplyr::pull(!!sym(params$design)) %>%
     unique() %>%
     as.character()
   contrasts <- contrasts %>% dplyr::filter(V1 %in% limit_contrasts)
@@ -580,8 +588,13 @@ removed <- colnames(sampleData[which(!colnames(sampleData) %in% rownames(DESeqDe
 # Reorder the metadata table to correspond to the order of columns in the count data
 DESeqDesign <- DESeqDesign[DESeqDesign$original_names %in% colnames(sampleData),]
 #DESeqDesign <- na.omit(DESeqDesign) #This line of code breaks everything if the metadata has NAs in it, asy for example from empty columns that are totally irrelevant and 'extra'...
-sampleData <- sampleData[,(rownames(DESeqDesign))]
+sampleData <- sampleData[,(rownames(DESeqDesign)), drop = FALSE]
 samples_after <- nrow(DESeqDesign)
+
+# Ensure all data is numeric
+rownames <- rownames(sampleData)
+sampleData <- as.data.frame(lapply(sampleData, as.numeric))
+rownames(sampleData) <- rownames
 
 head(rownames(DESeqDesign))
 head(colnames(sampleData)) # Output should match
@@ -726,21 +739,21 @@ This table shows the final list of samples that were used in the data analysis (
 if (any(grepl(x = colnames(DESeqDesign), pattern = "^dose$", ignore.case = T))) {
   doseCol <- grep(x = colnames(DESeqDesign), pattern = "^dose$", ignore.case = T)
   knitr::kable(DESeqDesign %>%
-                 group_by(!!sym(params$design)) %>%
-                 arrange(!!sym(colnames(DESeqDesign)[doseCol])),
+                 dplyr::group_by(!!sym(params$design)) %>%
+                 dplyr::arrange(!!sym(colnames(DESeqDesign)[doseCol])),
              row.names =  F,
              caption = "Samples and corresponding experimental conditions used in this report") %>%
   kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive")) %>%
   scroll_box(width = "100%", height = "480px")
 } else {
-  knitr::kable(DESeqDesign %>% arrange(!!sym(params$design)),
+  knitr::kable(DESeqDesign %>% dplyr::arrange(!!sym(params$design)),
              row.names =  F,
              caption = "Samples and corresponding experimental conditions used in this report") %>%
   kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive")) %>%
   scroll_box(width = "100%", height = "480px")
 }
 
-knitr::kable(DESeqDesign %>% group_by(!!sym(params$design)) %>% tally(),
+knitr::kable(DESeqDesign %>% dplyr::group_by(!!sym(params$design)) %>% tally(),
              row.names = F,
              col.names = c("Experimental group", "Number of samples in group"),
              caption = "Number of samples in each experimental group used in this report") %>%
@@ -754,7 +767,7 @@ This table shows the samples that were removed from this analysis.
 
 ```{r print_metadata_removed}
 # Conditionally sort by dose if that column name is present?
-knitr::kable(DESeqDesignAsRead %>% arrange(!!sym(params$design)) %>% dplyr::filter(!original_names %in% DESeqDesign$original_names),
+knitr::kable(DESeqDesignAsRead %>% dplyr::arrange(!!sym(params$design)) %>% dplyr::filter(!original_names %in% DESeqDesign$original_names),
              row.names =  F,
              caption = "Samples removed from analysis") %>%
   kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive")) %>%
@@ -762,7 +775,7 @@ knitr::kable(DESeqDesignAsRead %>% arrange(!!sym(params$design)) %>% dplyr::filt
 
 knitr::kable(DESeqDesignAsRead %>%
                dplyr::filter(original_names %in% removed) %>%
-               group_by(!!sym(params$design)) %>% tally(),
+               dplyr::group_by(!!sym(params$design)) %>% tally(),
              row.names = F,
              col.names = c("Experimental group", "Number of samples removed"),
              caption = "Number of samples removed from each experimental group") %>%
@@ -776,13 +789,13 @@ This table shows the original sample metadata including any samples that were re
 
 ```{r print_metadata_provided}
 # Conditionally sort by dose if that column name is present?
-knitr::kable(DESeqDesignAsRead %>% arrange(!!sym(params$design)),
+knitr::kable(DESeqDesignAsRead %>% dplyr::arrange(!!sym(params$design)),
              row.names =  F,
              caption = "Complete sample metadata as provided to the Genomics Laboratory.") %>%
   kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive")) %>%
   scroll_box(width = "100%", height = "480px")
 
-knitr::kable(DESeqDesignAsRead %>% group_by(!!sym(params$design)) %>% tally(),
+knitr::kable(DESeqDesignAsRead %>% dplyr::group_by(!!sym(params$design)) %>% tally(),
              row.names = F,
              col.names = c("Experimental group", "Number of samples as provided"),
              caption = "Number of samples and experimental groups as provided") %>%
@@ -1461,218 +1474,7 @@ The log2FoldChange shrinkage procedure used was `r resList[[1]]@priorInfo$type`.
 
 ## Create annotation tables
 
-```{r create_annotations_locally_on_machine_with_internet, eval=F}
-# library('AnnotationHub')
-# library('biomaRt')
-# library(GenomicFeatures)
-# library(rtracklayer)
-# library(rentrez)
-# library(dplyr)
-# library(readr)
-# setAnnotationHubOption("ASK", FALSE)
-# 
-# #############################################
-# #############
-# # Mouse #
-# #############
-# ensembl_species <- "mmusculus_gene_ensembl"
-# species_gene_symbol <- "mgi_symbol"
-# 
-# #############
-# # Zebrafish #
-# #############
-# ensembl_species <- "drerio_gene_ensembl"
-# species_gene_symbol <- "external_gene_name"
-# 
-# #################
-# # Rainbow trout #
-# #################
-# rainbowtrout
-# ensembl_species <- "omykiss_gene_ensembl"
-# species_gene_symbol <- "external_gene_name"
-# 
-# ##################
-# # Chinese Medaka #
-# ##################
-# chinesemedaka
-# ensembl_species <- "osinensis_gene_ensembl"
-# species_gene_symbol <- "external_gene_name"
-# 
-# ##################
-# # Fathead Minnow #
-# ##################
-# fatheadminnow
-# ensembl_species <- "ppromelas_gene_ensembl"
-# species_gene_symbol <- "external_gene_name"
-# #############################################
-# 
-# species <- if_else(
-#   ensembl_species == "drerio_gene_ensembl",
-#   "zebrafish",
-#   if_else(
-#     ensembl_species == "omykiss_gene_ensembl",
-#     "rainbowtrout",
-#     if_else(
-#       ensembl_species == "osinensis_gene_ensembl",
-#       "chinesemedaka",
-#       if_else(
-#         ensembl_species == "ppromelas_gene_ensembl",
-#         "fatheadminnow",
-#         if_else(
-#           ensembl_species == "mmusculus_gene_ensembl",
-#           "mouse",
-#           NA
-#         )
-#       )
-#     )
-#   )
-# )
-# biomart_filter <- "ensembl_gene_id"
-# 
-# #Note - useMart() will not work for Fathead Minnow
-# 
-# ensembl <- useMart("ensembl", dataset = ensembl_species,  host = "https://useast.ensembl.org") #West is no longer working
-# attributes <- listAttributes(ensembl)
-# #all_ensembl <- useMart("ensembl")
-# #all_datasets <- listDatasets(all_ensembl)
-# 
-# # Example generic gene IDs (for testing purposes)
-# #genes <- c("ENSDARG00000000001", "ENSDARG00000000002", "ENSDARG00000000003", "ENSDARG00000000018", "ENSDARG00000000019", "ENSDARG00000000068", "ENSDARG00000000069", "ENSOMYG00000042616", "ENSOMYG00000042616", "ENSOMYG00000042617", "ENSOMYG00000042618", "ENSOSIG00000001234", "ENSOSIG00000005678", "ENSOSIG00000009123", "ENSPPRG00000012345", "ENSPPRG00000067890", "ENSPPRG00000011223")
-# #genes <- lapply(resListAll,
-# #                function(x) row.names(as.data.frame(x)))
-# #genes <- unlist(genes) %>% unique()
-# 
-# if (species %in% c("zebrafish", "rainbowtrout", "hamster", "rat", "mouse", "human")) {
-#   ############################################################
-#   ### Zebrafish, Rainbow trout, Hamster, Rat, Mouse, Human ###
-#   ############################################################
-#   
-#   if (species == "zebrafish") {
-#     # Path to your local GFF/GTF file
-#     gtf_file <- "C:/Users/curryj/OneDrive - EC-EC/Desktop/tPOD_Curation_Project/tPOD_curation/annotationfiles/Danio_rerio.GRCz11.111.gtf"
-#   } else if (species == "rainbowtrout") {
-#     # Path to your local GFF/GTF file
-#     gtf_file <- "C:/Users/curryj/OneDrive - EC-EC/Desktop/tPOD_Curation_Project/tPOD_curation/annotationfiles/Oncorhynchus_mykiss.USDA_OmykA_1.1.112.gtf"
-#   } else if (species == "mouse") {
-#     gtf_file <- "C:/Users/curryj/OneDrive - EC-EC/Desktop/tPOD_Curation_Project/tPOD_curation/annotationfiles/Mus_musculus.GRCm39.112.gtf"
-#   } else {
-#     stop("No gtf annotation files in directory... please download")
-#   }
-#   
-#   # Import the GFF/GTF file
-#   annotations <- import(gtf_file)
-#   
-#   # Convert annotations to a data frame
-#   annotations_df <- as.data.frame(annotations)
-#   
-#   genes <- annotations_df %>%
-#     dplyr::pull(gene_id) %>%
-#     unique()
-#   
-#   id_table_entrez <- getBM(
-#     filters = biomart_filter,
-#     attributes = c(
-#       biomart_filter,
-#       species_gene_symbol,
-#       "description",
-#       "entrezgene_id",
-#       "entrezgene_accession"
-#     ),
-#     values = genes, #genes/all the genes in the genome
-#     mart = ensembl
-#   )
-#   
-#   if (species == "zebrafish") {
-#     readr::write_csv(id_table_entrez, "C:/Users/curryj/OneDrive - EC-EC/Desktop/tPOD_Curation_Project/tPOD_curation/annotationfiles/zebrafish_annotated_id_table_entrez_wholegenome.csv")    
-#   } else if (species == "rainbowtrout") {
-#     readr::write_csv(id_table_entrez, "C:/Users/curryj/OneDrive - EC-EC/Desktop/tPOD_Curation_Project/tPOD_curation/annotationfiles/rainbowtrout_annotated_id_table_entrez_wholegenome.csv") 
-#   } else if (species == "mouse") {
-#     readr::write_csv(id_table_entrez, "C:/Users/curryj/OneDrive - EC-EC/Desktop/tPOD_Curation_Project/tPOD_curation/annotationfiles/mouse_annotated_id_table_entrez_wholegenome.csv") 
-#   } else {
-#     print("No files written")
-#   }
-# 
-# } else if (species %in% c("chinesemedaka")) {
-#   ######################
-#   ### Chinese Medaka ###
-#   ######################
-#   
-#   # Path to your local GFF/GTF file
-#   gtf_file <- "C:/Users/curryj/OneDrive - EC-EC/Desktop/tPOD_Curation_Project/tPOD_curation/annotationfiles/Oryzias_sinensis.ASM858656v1.112.gtf"
-#   
-#   # Import the GFF/GTF file
-#   annotations <- import(gtf_file)
-#   
-#   # Convert annotations to a data frame
-#   annotations_df <- as.data.frame(annotations)
-#   
-#   genes <- annotations_df %>%
-#     dplyr::pull(gene_id) %>%
-#     unique()
-#   
-#   id_table_entrez <- getBM(filters = biomart_filter,
-#                            attributes = c(biomart_filter,
-#                                           species_gene_symbol,
-#                                           "description",
-#                                           "zfin_id_id",
-#                                           "zfin_id_symbol"),
-#                            values = genes,
-#                            mart = ensembl)
-#   
-#   readr::write_csv(id_table_entrez, "C:/Users/curryj/OneDrive - EC-EC/Desktop/tPOD_Curation_Project/tPOD_curation/annotationfiles/chinesemedaka_annotated_id_table_entrez_wholegenome.csv") 
-#   
-# } else if (species %in% c("fatheadminnow")) {
-#   ######################
-#   ### Fathead Minnow ###
-#   ######################
-#   
-#   #No BioMart is available so all information is strictly from the .gtf file
-#   
-#   # Path to your local GFF/GTF file
-#   gtf_file <- "C:/Users/curryj/OneDrive - EC-EC/Desktop/tPOD_Curation_Project/tPOD_curation/annotationfiles/FHM_genomic.gtf"
-#   
-#   # Import the GFF/GTF file
-#   annotations <- import(gtf_file)
-#   
-#   # Convert annotations to a data frame
-#   annotations_df <- as.data.frame(annotations)
-#   
-#   # Extract product information for transcripts and exons
-#   transcript_exon_products <- annotations_df %>%
-#     dplyr::filter(type %in% c("transcript", "exon", "CDS", "start_codon", "stop_codon")) %>%
-#     dplyr::select(gene_id, product) %>%
-#     dplyr::filter(!is.na(product)) %>%
-#     dplyr::distinct()
-#   
-#   # Aggregate product information at the gene level
-#   gene_products <- transcript_exon_products %>%
-#     dplyr::group_by(gene_id) %>%
-#     dplyr::summarize(product = paste(unique(product), collapse = "; "), .groups = 'drop')
-#   
-#   # Add product information to gene annotations
-#   annotations_df <- annotations_df %>%
-#     dplyr::left_join(gene_products, by = "gene_id") %>%
-#     dplyr::mutate(product = dplyr::coalesce(product.y, product.x)) %>%
-#     dplyr::select(-product.x, -product.y)
-#   
-#   # Filter for genes and select relevant columns
-#   gene_annotations_df <- annotations_df %>%
-#     dplyr::filter(type == "gene") %>%
-#     dplyr::select(seqnames, start, end, strand, gene_id, db_xref, product)
-#   
-#   annotations_df <- gene_annotations_df %>%
-#     dplyr::mutate(ensembl_gene_id = gsub("GeneID:", "", db_xref)) %>%
-#     dplyr::mutate(entrezgene_id = ensembl_gene_id) %>%
-#     dplyr::mutate(external_gene_name = gene_id) %>%
-#     dplyr::mutate(entrezgene_accession = gene_id) %>%
-#     dplyr::rename(description = product) %>%
-#     dplyr::select(ensembl_gene_id, external_gene_name, description, entrezgene_id, entrezgene_accession)
-#   
-#   readr::write_csv(annotations_df, "C:/Users/curryj/OneDrive - EC-EC/Desktop/tPOD_Curation_Project/tPOD_curation/annotationfiles/fatheadminnow_annotated_id_table_entrez_wholegenome.csv") 
-#   
-# }
-
-```
+Create custom annotation tables using the Create_custom_annoations.R script. Then copy the tabel to the `genome` directory in the project directory. The script will automatically load the annotation table from the `genome` directory. The annotation table should contain the following columns: `biomart_filter`, `species_gene_symbol`, `description`, `entrezgene_id`, `entrezgene_accession`, and any other additinal columns like homologous genes.
 
 ```{r}
 ################################################################################
@@ -1698,7 +1500,7 @@ if (Platform == "RNA-Seq") {
 	# Filter the manifest by probe names that match the results in resList
 	#gene_ids <- temposeq_genes %>%
 	#	dplyr::filter(PROBE_NAME %in% genes) %>%
-	#	pull(GENE_SYMBOL)
+	#	dplyr::pull(GENE_SYMBOL)
 	# Now load the annotation file with the ensembl gene ids
 	id_table_entrez_all_genes <- readr::read_csv(normalizePath(file.path(projectdir, "genome", paste0(species, "_annotated_id_table_entrez_wholegenome.csv")))) #Note - You will have to include this file in the genome directory. Original file copy can be found in project dir.
 	# Filter the gene id column by those gene ids from the filtered manifest
@@ -1715,27 +1517,27 @@ if (Platform == "RNA-Seq") {
       dplyr::filter(PROBE %in% genes) %>%
 	  dplyr::select(!!sym(biomart_filter), !!sym(species_gene_symbol), description, entrezgene_id, entrezgene_accession, PROBE)
 	save(id_table_entrez, file = normalizePath(file.path(paths$RData, "id_table.RData")))
-	id_table <- distinct(id_table_entrez[, c(1,2,3,6)])
+	id_table <- dplyr::distinct(id_table_entrez[, c(1,2,3,6)])
 	missing_genes <- setdiff(genes, id_table$PROBE)
 }
 
 
-if (any(species %in% c("zebrafish", "rainbowtrout", "hamster", "rat", "mouse", "human", "chinesemedaka")) & Platform == "RNA-Seq") {
+if (any(species %in% c("zebrafish", "rainbowtrout", "hamster", "rat", "mouse", "human", "chinesemedaka", "daphnia", "algae")) & Platform == "RNA-Seq") {
 
   if (file.exists(normalizePath(file.path(paths$RData, "id_table.RData"))) & params$use_cached_RData == TRUE) {
 
     print(paste("Already found ID table; loading from disk."))
     load(normalizePath(file.path(paths$RData, "id_table.RData")))
-    id_table <- distinct(id_table_entrez[, 1:3])
+    id_table <- dplyr::distinct(id_table_entrez[, 1:3])
 
     } else {
     
     id_table_entrez_all_genes <- readr::read_csv(normalizePath(file.path(paths$metadata, "genome", paste0(species, "_annotated_id_table_entrez_wholegenome.csv")))) #Note - You will have to include this file in the genome directory. Original file copy can be found in project dir.
     id_table_entrez <- id_table_entrez_all_genes %>%
       dplyr::filter(ensembl_gene_id %in% genes) %>%
-      distinct()
+      dplyr::distinct()
     save(id_table_entrez, file = normalizePath(file.path(paths$RData, "id_table.RData")))
-    id_table <- distinct(id_table_entrez[, 1:3])
+    id_table <- dplyr::distinct(id_table_entrez[, 1:3])
 
   }
 
@@ -1747,16 +1549,16 @@ if (any(species %in% c("zebrafish", "rainbowtrout", "hamster", "rat", "mouse", "
 
       print(paste("Already found ID table; loading from disk."))
       load(file.path(paths$RData, "id_table.RData"))
-      id_table <- distinct(id_table_entrez[, 1:3])
+      id_table <- dplyr::distinct(id_table_entrez[, 1:3])
 
     } else {
 
      id_table_entrez_all_genes <- readr::read_csv(normalizePath(file.path(paths$metadata, "genome", paste0(species, "_annotated_id_table_entrez_wholegenome.csv")))) #Note - You will have to include this file in the genome directory. Original file copy can be found in project dir.
     id_table_entrez <- id_table_entrez_all_genes %>%
       dplyr::filter(external_gene_name %in% genes) %>%
-      distinct()
+      dplyr::distinct()
     save(id_table_entrez, file = file.path(paths$RData, "id_table.RData"))
-    id_table <- distinct(id_table_entrez[, 1:3])
+    id_table <- dplyr::distinct(id_table_entrez[, 1:3])
     id_table$ensembl_gene_id <- as.character(id_table$ensembl_gene_id)
 
     }
@@ -1800,284 +1602,558 @@ knitr::kable(id_table_entrez,
 # Table modifications
 ################################################################################
 
-#### THIS SECTION AND FOLLOWING SECTIONS NEED TO BE UPDATED FOR FATHEAD MINNNOW!
+# Helper function to calculate linear fold change  
+calculate_linear_fc <- function(log2fc) {
+  ifelse(log2fc > 0,
+          2^log2fc,
+          -1/(2^log2fc))
+}
 
-annotate_deseq_table <-
-  function(deseq_results_list,
-           filter_results = FALSE,
-           join_by = join_by) {
-    annotated_results <- list()
-    all_empty <- TRUE
-    for (i in seq_along(deseq_results_list)) {
-      deg_table <- deseq_results_list[[i]]
-      if (nrow(deg_table) == 0)
-        next
-      all_empty <- FALSE
-      deg_table <-
-        cbind(
-          genes = row.names(deg_table),
-          as.data.frame(deg_table),
-          contrast = gsub(
-            paste0("log2.*", DESIGN, " "),
-            "",
-            deg_table@elementMetadata[[2]][2]
-          )
-        )
-      #dummy_contrast <- unique(deg_table$contrast)
-      names(deg_table)[names(deg_table) == "genes"] <- join_by
-      deg_table <-
-        dplyr::left_join(deg_table, id_table, by = join_by)
-      if (nrow(deg_table) == 0) {
-        print("Warning: Join resulted in an empty dataframe!")
-      }
-      deg_table <-
-        dplyr::mutate(deg_table,
-                      linearFoldChange = if_else(
-                        as.numeric(log2FoldChange) > 0,
-                        2 ^ as.numeric(log2FoldChange),-1 / (2 ^ as.numeric(log2FoldChange))
-                      ))
-      deg_table <-
-        if (Platform == "RNA-Seq") {
-          dplyr::select(
-            deg_table,!!sym(biomart_filter),!!sym(species_gene_symbol),
-            description,
-            baseMean,
-            log2FoldChange,
+annotate_deseq_table <- function(deseq_results_list,
+                                filter_results = FALSE,
+                                join_by) {
+  
+  annotated_results <- list()
+  all_empty <- TRUE
+  
+  # Add debugging
+  message("Processing ", length(deseq_results_list), " DESeq2 results")
+  
+  # Process each results object
+  for (i in seq_along(deseq_results_list)) {
+    message("Processing result ", i)
+    deg_table <- deseq_results_list[[i]]
+    
+    # Skip empty tables but print message
+    if (nrow(deg_table) == 0) {
+      message("Result ", i, " is empty, skipping")
+      next
+    }
+    
+    message("Result ", i, " has ", nrow(deg_table), " rows")
+    all_empty <- FALSE
+    
+    # Extract contrast name
+    contrast_name <- tryCatch({
+      gsub(paste0("log2.*", DESIGN, " "), "", deg_table@elementMetadata[[2]][2])
+    }, error = function(e) {
+      warning("Could not extract contrast name: ", e$message)
+      paste("Contrast", i)
+    })
+    
+    message("Contrast name: ", contrast_name)
+    
+    # Convert to data frame and add identifier columns
+    deg_table_df <- as.data.frame(deg_table)
+    # Ensure row names are preserved
+    deg_table_df[[join_by]] <- row.names(deg_table_df)
+    # Add contrast column
+    deg_table_df$contrast <- contrast_name
+    
+    message("Joining with id_table using column: ", join_by)
+    
+    # Join with annotation data with debugging
+    if (!exists("id_table")) {
+      warning("id_table not found in environment - cannot annotate results")
+      annotated_results[[i]] <- deg_table_df
+      next
+    }
+    
+    if (!join_by %in% colnames(id_table)) {
+      warning("Join column '", join_by, "' not found in id_table. Available columns: ", 
+              paste(colnames(id_table), collapse=", "))
+      annotated_results[[i]] <- deg_table_df
+      next
+    }
+    
+    # Use left_join to preserve all DEG rows
+    deg_table_joined <- dplyr::left_join(deg_table_df, id_table, by = join_by)
+    
+    message("After join, table has ", nrow(deg_table_joined), " rows")
+    
+    if (nrow(deg_table_joined) == 0) {
+      warning("Join resulted in an empty dataframe for contrast ", contrast_name)
+      # Store original results to avoid losing data
+      annotated_results[[i]] <- deg_table_df
+      next
+    }
+    
+    # Calculate linear fold change using the internally defined function
+    deg_table_joined <- dplyr::mutate(
+      deg_table_joined,
+      linearFoldChange = ifelse(
+        as.numeric(log2FoldChange) > 0,
+        2 ^ as.numeric(log2FoldChange),
+        -1 / (2 ^ as.numeric(log2FoldChange))
+      )
+    )
+    
+    # Select appropriate columns based on platform - with error handling
+    tryCatch({
+      if (Platform == "RNA-Seq") {
+        if (!all(c(biomart_filter, species_gene_symbol) %in% colnames(deg_table_joined))) {
+          warning("Required columns missing. Available: ", paste(colnames(deg_table_joined), collapse=", "))
+          # Keep all columns if we can't find the specific ones
+          selected_df <- deg_table_joined
+        } else {
+          selected_df <- dplyr::select(
+            deg_table_joined, 
+            !!sym(biomart_filter), 
+            !!sym(species_gene_symbol),
+            description, 
+            baseMean, 
+            log2FoldChange, 
             linearFoldChange,
-            lfcSE,
-            pvalue,
-            padj,
-            contrast
-          )
-        } else if (Platform == "TempO-Seq") {
-          dplyr::select(
-            deg_table,!!sym(biomart_filter),!!sym(species_gene_symbol),!!sym(join_by),
-            description,
-            baseMean,
-            log2FoldChange,
-            linearFoldChange,
-            lfcSE,
-            pvalue,
-            padj,
+            lfcSE, 
+            pvalue, 
+            padj, 
             contrast
           )
         }
-      if (filter_results &&
-          "linearFoldChange" %in% colnames(deg_table) &&
-          nrow(deg_table) > 0) {
-        deg_table <-
-          dplyr::filter(deg_table,!is.na(padj) &
-                          padj < alpha &
-                          abs(linearFoldChange) > linear_fc_filter)
+      } else if (Platform == "TempO-Seq") {
+        if (!all(c(biomart_filter, species_gene_symbol, join_by) %in% colnames(deg_table_joined))) {
+          warning("Required columns missing. Available: ", paste(colnames(deg_table_joined), collapse=", "))
+          # Keep all columns if we can't find the specific ones
+          selected_df <- deg_table_joined
+        } else {
+          selected_df <- dplyr::select(
+            deg_table_joined, 
+            !!sym(biomart_filter), 
+            !!sym(species_gene_symbol), 
+            !!sym(join_by),
+            description, 
+            baseMean, 
+            log2FoldChange, 
+            linearFoldChange,
+            lfcSE, 
+            pvalue, 
+            padj, 
+            contrast
+          )
+        }
+      } else {
+        # Default case - keep all columns
+        selected_df <- deg_table_joined
+        warning("Unknown platform: ", Platform, ". Keeping all columns.")
       }
-      if (nrow(deg_table) > 0) {
-        annotated_results[[i]] <- distinct(deg_table)
+    }, error = function(e) {
+      warning("Error in column selection: ", e$message, ". Keeping all columns.")
+      selected_df <- deg_table_joined
+    })
+    
+    # Apply significance filtering if requested
+    if (filter_results) {
+      if (!all(c("padj", "linearFoldChange") %in% colnames(selected_df))) {
+        warning("Cannot filter - missing required columns")
+      } else {
+        original_rows <- nrow(selected_df)
+        selected_df <- dplyr::filter(
+          selected_df,
+          !is.na(padj) & padj < alpha & abs(linearFoldChange) > linear_fc_filter
+        )
+        message("Filtered from ", original_rows, " to ", nrow(selected_df), " rows")
       }
     }
-    if (all_empty) {
-      print("All DESeq2 results were empty. Returning dummy result.")
-      dummy_contrast <- gsub(paste0("log2.*", DESIGN, " "), "", deg_table@elementMetadata[[2]][2])
-      if (Platform == "RNA-Seq") {
-        # Define a dummy result
-        dummy_result <- data.frame(
-          temp_col1 = "DUMMY",
-          temp_col2 = "DUMMY",
-          description = "No results",
-          baseMean = 0,
-          log2FoldChange = 0,
-          linearFoldChange = 1,
-          lfcSE = 0,
-          pvalue = 1,
-          padj = 1,
-          contrast = dummy_contrast
-        )
-        names(dummy_result)[1:2] <-
-          c(biomart_filter, species_gene_symbol)
-      } else if (Platform == "TempO-Seq") {
-        # Define a dummy result
-        dummy_result <- data.frame(
-          temp_col1 = "DUMMY",
-          temp_col2 = "DUMMY",
-          temp_col3 = "DUMMY",
-          description = "No results",
-          baseMean = 0,
-          log2FoldChange = 0,
-          linearFoldChange = 1,
-          lfcSE = 0,
-          pvalue = 1,
-          padj = 1,
-          contrast = dummy_contrast
-        )
-        names(dummy_result)[1:3] <-
-          c(biomart_filter, species_gene_symbol, join_by)
-      }
+    
+    # Store results if there are any
+    if (nrow(selected_df) > 0) {
+      message("Storing ", nrow(selected_df), " rows for result ", i)
+      annotated_results[[i]] <- dplyr::distinct(selected_df)
+    } else {
+      message("No rows to store for result ", i, " after processing")
+    }
+  }
+  
+  # Check if we found any results
+  if (length(annotated_results) == 0) {
+    message("No results found after processing all DESeq2 results")
+    all_empty <- TRUE
+  }
+  
+  # Handle case when all results are empty
+  if (all_empty) {
+    message("All DESeq2 results were empty or filtered out. Returning dummy result.")
+    dummy_contrast <- "No DEGs"
+    
+    # Create appropriate dummy result structure based on platform
+    if (Platform == "RNA-Seq") {
+      dummy_result <- data.frame(
+        temp_col1 = "DUMMY",
+        temp_col2 = "DUMMY",
+        description = "No results",
+        baseMean = 0,
+        log2FoldChange = 0,
+        linearFoldChange = 1,
+        lfcSE = 0,
+        pvalue = 1,
+        padj = 1,
+        contrast = dummy_contrast,
+        stringsAsFactors = FALSE
+      )
+      names(dummy_result)[1:2] <- c(biomart_filter, species_gene_symbol)
+      return(dummy_result)
+    } else if (Platform == "TempO-Seq") {
+      dummy_result <- data.frame(
+        temp_col1 = "DUMMY",
+        temp_col2 = "DUMMY",
+        temp_col3 = "DUMMY",
+        description = "No results",
+        baseMean = 0,
+        log2FoldChange = 0,
+        linearFoldChange = 1,
+        lfcSE = 0,
+        pvalue = 1,
+        padj = 1,
+        contrast = dummy_contrast,
+        stringsAsFactors = FALSE
+      )
+      names(dummy_result)[1:3] <- c(biomart_filter, species_gene_symbol, join_by)
       return(dummy_result)
     }
-    return(data.table::rbindlist(annotated_results))
   }
+  
+  message("Returning ", length(annotated_results), " processed results")
+  return(annotated_results)
+}
 
 # Ensure alpha and linear_fc_filter are set correctly
-print(alpha)
 alpha <- params$fdr_threshold
-print(linear_fc_filter)
 linear_fc_filter <- params$linear_fc_filter
+print(paste("FDR threshold:", alpha))
+print(paste("Linear fold change filter:", linear_fc_filter))
 
-# Write dataframe of all results
-# Significant only
-significantResults <- annotate_deseq_table(resList, filter_results = T, join_by = if_else(condition = Platform == "TempO-Seq", true = "PROBE", false = if_else(condition = species == "fatheadminnow", true = species_gene_symbol, false = biomart_filter)))
-significantResults <- significantResults %>% dplyr::mutate(contrast = as.factor(contrast))
-
-print(paste("Total number of significant results:", nrow(significantResults)))
-
-# Set 'anyDEGs' to specify what should be evaluated if there are no DEGs to display in the report
-if (any(significantResults[[species_gene_symbol]] == "DUMMY", na.rm = TRUE)) {
-  print(paste0("significantResults is empty."))
-  anyDEGs <- FALSE # For setting evaluation logic
+# Determine join column based on platform and species
+join_column <- if (Platform == "TempO-Seq") {
+  "PROBE"
+} else if (species == "fatheadminnow") {
+  species_gene_symbol
 } else {
-  anyDEGs <- TRUE # For setting evaluation logic
+  biomart_filter
 }
 
-# All results including non-significant
-allResults <- annotate_deseq_table(resListAll, filter_results = F, join_by = if_else(condition = Platform == "TempO-Seq", true = "PROBE", false = if_else(condition = species == "fatheadminnow", true = species_gene_symbol, false = biomart_filter)))
-allResults <- allResults %>% dplyr::mutate(contrast = as_factor(contrast))
+# Process significant results with clear error messages
+significantResults <- tryCatch({
+  results <- annotate_deseq_table(
+    deseq_results_list = resList,
+    filter_results = TRUE,
+    join_by = join_column
+  )
+  
+  if (is.data.frame(results)) {
+    # Handle single data frame result
+    results <- results %>% dplyr::mutate(contrast = as.factor(contrast))
+  } else if (length(results) > 0) {
+    # Handle list of results - combine into one data frame for easier use
+    results <- dplyr::bind_rows(results)
+    results <- results %>% dplyr::mutate(contrast = as.factor(contrast))
+  }
+  
+  results
+}, error = function(e) {
+  message("Error in annotate_deseq_table: ", e$message)
+  data.frame(
+    temp_col1 = "ERROR",
+    temp_col2 = paste("Error processing results:", e$message),
+    stringsAsFactors = FALSE
+  )
+})
 
+# For data frames, ensure contrast is a factor
+if (is.data.frame(significantResults)) {
+  if (!"contrast" %in% colnames(significantResults)) {
+    significantResults <- significantResults %>% dplyr::mutate(contrast = "No DEGs")
+  }
+  significantResults <- significantResults %>% dplyr::mutate(contrast = as.factor(contrast))
+  print(paste("Total number of significant results:", 
+            if(is.data.frame(significantResults)) nrow(significantResults) 
+            else sum(sapply(significantResults, nrow))))
+}
 
+# Determine if any DEGs were found
+if (is.data.frame(significantResults)) {
+  anyDEGs <- !any(significantResults[[species_gene_symbol]] == "DUMMY", na.rm = TRUE)
+  print(paste0("significantResults is ", if(anyDEGs) "not " else "", "empty."))
+} else {
+  anyDEGs <- TRUE
+}
+
+# Process all results (including non-significant)
+allResults <- tryCatch({
+  results <- annotate_deseq_table(
+    deseq_results_list = resListAll,
+    filter_results = FALSE,
+    join_by = join_column
+  )
+  
+  if (is.data.frame(results)) {
+    # Handle single data frame result
+    results <- results %>% dplyr::mutate(contrast = as.factor(contrast))
+  } else if (length(results) > 0) {
+    # Handle list of results - combine into one data frame for easier use
+    results <- dplyr::bind_rows(results)
+    results <- results %>% dplyr::mutate(contrast = as.factor(contrast))
+  }
+  
+  results
+}, error = function(e) {
+  message("Error in annotate_deseq_table: ", e$message)
+  data.frame(
+    temp_col1 = "ERROR",
+    temp_col2 = paste("Error processing results:", e$message),
+    stringsAsFactors = FALSE
+  )
+})
+
+# If allResults is a list, bind into a single data frame
+if (is.list(allResults) && !is.data.frame(allResults) && length(allResults) > 0) {
+  allResults <- dplyr::bind_rows(allResults)
+}
+
+# Handle missing gene symbols
 if (Platform == "RNA-Seq") {
-	# All Results for Plotting
-	# Replace NA gene symbols with ensembl ID
-	allResults[[species_gene_symbol]][is.na(allResults[[species_gene_symbol]])] <- allResults[[biomart_filter]][is.na(allResults[[species_gene_symbol]])] 
-	# Replace blank gene symbols with ensembl ID
-	allResults[[species_gene_symbol]][allResults[[species_gene_symbol]] == ""]  <- allResults[[biomart_filter]][allResults[[species_gene_symbol]] == ""]
+  # Replace NA gene symbols with ensembl ID
+  allResults[[species_gene_symbol]][is.na(allResults[[species_gene_symbol]])] <- 
+    allResults[[biomart_filter]][is.na(allResults[[species_gene_symbol]])]
+  
+  # Replace blank gene symbols with ensembl ID
+  allResults[[species_gene_symbol]][allResults[[species_gene_symbol]] == ""] <- 
+    allResults[[biomart_filter]][allResults[[species_gene_symbol]] == ""]
 } else if (Platform == "TempO-Seq") {
-	# All Results for Plotting
-	# Replace NA gene symbols with PROBE ID
-	allResults[[species_gene_symbol]][is.na(allResults[[species_gene_symbol]])] <- allResults[["PROBE"]][is.na(allResults[[species_gene_symbol]])] 
-	# Replace blank gene symbols with PROBE ID
-	allResults[[species_gene_symbol]][allResults[[species_gene_symbol]] == ""]  <- allResults[["PROBE"]][allResults[[species_gene_symbol]] == ""]
+  # Replace NA gene symbols with PROBE ID
+  allResults[[species_gene_symbol]][is.na(allResults[[species_gene_symbol]])] <- 
+    allResults[["PROBE"]][is.na(allResults[[species_gene_symbol]])]
+  
+  # Replace blank gene symbols with PROBE ID
+  allResults[[species_gene_symbol]][allResults[[species_gene_symbol]] == ""] <- 
+    allResults[["PROBE"]][allResults[[species_gene_symbol]] == ""]
 }
 
+# Convert contrast to factor
+allResults <- allResults %>% dplyr::mutate(contrast = as.factor(contrast))
 
+# Prepare data for IPA
 IPA <- allResults %>% 
-  distinct() %>% 
-  pivot_wider(names_from = contrast, values_from = c(log2FoldChange, linearFoldChange, lfcSE, pvalue, padj))
-allResults$padj[allResults$padj == 0] <- 10^-100 # For plotting purposes!
-allResultsOrdered_logFC_filter <- dplyr::filter(allResults, abs(linearFoldChange) > 1.5) %>%
-  arrange(-abs(linearFoldChange))
-allResultsOrdered_logFC_filter <- dplyr::filter(allResultsOrdered_logFC_filter, padj < alpha)
+  dplyr::distinct() %>% 
+  tidyr::pivot_wider(
+    names_from = contrast, 
+    values_from = c(log2FoldChange, linearFoldChange, lfcSE, pvalue, padj)
+  )
+
+# Replace zeros with small values for log plotting
+allResults$padj[allResults$padj == 0] <- 10^-100
+
+# Filter results for visualization
+allResultsOrdered_logFC_filter <- allResults %>%
+  dplyr::filter(abs(linearFoldChange) > linear_fc_filter, padj < alpha) %>%
+  dplyr::arrange(desc(abs(linearFoldChange)))
+
 res.df <- allResultsOrdered_logFC_filter
 
+# Create DEG summary table
 degTable <- significantResults %>%
   dplyr::group_by(contrast) %>%
   dplyr::count() %>%
   dplyr::mutate(
-    # Extract numeric part from contrast using sub and convert to numeric
+    # Extract numeric part from contrast and convert to numeric for sorting
     sort_key = as.numeric(sub(" .*", "", contrast))
   ) %>%
-  # Arrange rows based on the numeric sort_key in ascending order
   dplyr::arrange(sort_key) %>%
-  dplyr::select(-sort_key)  # Remove the temporary sorting key column
+  dplyr::select(-sort_key)
 
 # Set factor levels for contrast based on the sorted order
 degTable$contrast <- factor(degTable$contrast, levels = degTable$contrast)
 
+# Create summary table
 lengths <- lapply(resList, nrow)
 longest <- which.max(lengths)
 all_zero <- all(unlist(lengths) == 0)
+
 if (all_zero) {
-  summaryTable <- data.frame( genes =  "DUMMY",
-                            baseMean =  0)
+  summaryTable <- data.frame(
+    genes = "DUMMY",
+    baseMean = 0
+  )
 } else {
-  summaryTable <- data.frame( genes =  row.names(resList[[longest]]),
-                            baseMean = resList[[longest]]$baseMean )
+  summaryTable <- data.frame(
+    genes = row.names(resList[[longest]]),
+    baseMean = resList[[longest]]$baseMean
+  )
 }
-col_name <- if_else(condition = Platform == "RNA-Seq", true = biomart_filter, false = "PROBE")
+
+# Set column name based on platform
+col_name <- if(Platform == "RNA-Seq") biomart_filter else "PROBE"
 names(summaryTable)[names(summaryTable) == "genes"] <- col_name
-contrastsInSummary <- vector()
-for (i in 1:length(resList)) {
-  print(i)
-  n <- resList[[i]]@elementMetadata[[2]][2]
-  n <- gsub(pattern = paste0("log2\ fold\ change\ \\(MMSE\\):\ ", DESIGN), # Might need to be MLE for some tests
-            replacement =  paste0("log2 Fold Change"),
-            x = resList[[i]]@elementMetadata[[2]][2])
-  p <- gsub(pattern = paste0("log2\ fold\ change\ \\(MMSE\\):\ ", DESIGN),
-           replacement =  resList[[i]]@elementMetadata[[2]][6], # Not used?
-           x = resList[[i]]@elementMetadata[[2]][2])
-  q <- gsub(pattern = paste0("log2\ fold\ change\ \\(MMSE\\):\ ", DESIGN, "\ "),
-            replacement =  "",
-            x = resList[[i]]@elementMetadata[[2]][2])
-  message(n)
-  message(p)
-  message(q)
-  toJoin <- as.data.frame(resList[[i]])
-  setDT(toJoin, keep.rownames = T)[]
-  setnames(toJoin, 1, col_name)
-  toJoin <- dplyr::mutate(toJoin, linearFoldChange = ifelse(log2FoldChange > 0,
-                                                2 ^ log2FoldChange,
-                                                -1 / (2 ^ log2FoldChange)))
-  toJoin <- toJoin[, c(1:3, 7, 4:6)]
-  summaryTable <- dplyr::left_join(summaryTable, dplyr::select(toJoin, !c(baseMean, pvalue, lfcSE)), by = col_name)
 
-  names(summaryTable)[[ncol(summaryTable) - 2]] <- paste0("log2FoldChange_", i)
-  names(summaryTable)[[ncol(summaryTable) - 1]] <- paste0("linearFoldChange_", i)
-  names(summaryTable)[[ncol(summaryTable)]] <- paste0("FDR_", i)
-  contrastsInSummary[i] <- q
-  print(summary(resList[[i]], pAdjValue))
+contrastsInSummary <- vector()
+
+# Process each result for the summary table
+for (i in seq_along(resList)) {
+  print(i)
+  
+  # Extract contrast information even for empty results
+  tryCatch({
+    n <- resList[[i]]@elementMetadata[[2]][2]
+    n <- gsub(pattern = paste0("log2\\ fold\\ change\\ \\(MMSE\\):\\ ", DESIGN),
+              replacement = paste0("log2 Fold Change"),
+              x = resList[[i]]@elementMetadata[[2]][2])
+    
+    p <- gsub(pattern = paste0("log2\\ fold\\ change\\ \\(MMSE\\):\\ ", DESIGN),
+              replacement = resList[[i]]@elementMetadata[[2]][6],
+              x = resList[[i]]@elementMetadata[[2]][2])
+    
+    q <- gsub(pattern = paste0("log2\\ fold\\ change\\ \\(MMSE\\):\\ ", DESIGN, "\\ "),
+              replacement = "",
+              x = resList[[i]]@elementMetadata[[2]][2])
+    
+    message(n)
+    message(p)
+    message(q)
+    
+    # Store contrast name
+    contrastsInSummary[i] <- q
+    
+    # Print summary for all results (empty or not)
+    print(summary(resList[[i]], pAdjValue))
+    
+    if (nrow(resList[[i]]) == 0) {
+      message(paste("Adding placeholder columns for empty result for contrast", i))
+      
+      # Add placeholder columns with zeros/ones for empty results
+      summaryTable[[paste0("log2FoldChange_", i)]] <- 0
+      summaryTable[[paste0("linearFoldChange_", i)]] <- 1  # Fold change of 1 means no change
+      summaryTable[[paste0("FDR_", i)]] <- 1  # FDR of 1 means not significant
+      
+      message("Added placeholder columns for contrast ", i, ": ", 
+              paste0("log2FoldChange_", i), ", ", 
+              paste0("linearFoldChange_", i), ", ", 
+              paste0("FDR_", i))
+    } else {
+      # Convert to data frame
+      result_df <- as.data.frame(resList[[i]])
+      
+      # Create a lookup table for this contrast
+      lookup_df <- data.frame(
+        ensembl_gene_id = rownames(result_df),
+        log2FC = result_df$log2FoldChange,
+        linearFC = ifelse(
+          result_df$log2FoldChange > 0,
+          2 ^ result_df$log2FoldChange,
+          -1 / (2 ^ result_df$log2FoldChange)
+        ),
+        padj = result_df$padj,
+        stringsAsFactors = FALSE
+      )
+      
+      # Now directly add columns to summaryTable using match
+      # This avoids joining/merging completely
+      id_match <- match(summaryTable$ensembl_gene_id, lookup_df$ensembl_gene_id)
+      
+      # Add columns with unique names based on contrast number
+      summaryTable[[paste0("log2FoldChange_", i)]] <- lookup_df$log2FC[id_match]
+      summaryTable[[paste0("linearFoldChange_", i)]] <- lookup_df$linearFC[id_match]
+      summaryTable[[paste0("FDR_", i)]] <- lookup_df$padj[id_match]
+      
+      # Replace NAs with zeros
+      summaryTable[[paste0("log2FoldChange_", i)]][is.na(summaryTable[[paste0("log2FoldChange_", i)]])] <- 0
+      summaryTable[[paste0("linearFoldChange_", i)]][is.na(summaryTable[[paste0("linearFoldChange_", i)]])] <- 0
+      summaryTable[[paste0("FDR_", i)]][is.na(summaryTable[[paste0("FDR_", i)]])] <- 1
+      
+      message("Added columns for contrast ", i, ": ", 
+              paste0("log2FoldChange_", i), ", ", 
+              paste0("linearFoldChange_", i), ", ", 
+              paste0("FDR_", i))
+    }
+    
+  }, error = function(e) {
+    # If anything fails for this contrast, report the error and continue
+    message(paste("Error processing contrast", i, ":", e$message))
+    contrastsInSummary[i] <- paste("Contrast", i, "(Error)")
+    
+    # Add placeholder columns even for error cases
+    summaryTable[[paste0("log2FoldChange_", i)]] <- 0
+    summaryTable[[paste0("linearFoldChange_", i)]] <- 1
+    summaryTable[[paste0("FDR_", i)]] <- 1
+    
+    message("Added error placeholder columns for contrast ", i)
+  })
 }
 
+# Final check
+message("Final summary table has ", ncol(summaryTable), " columns")
+message("Column names: ", paste(names(summaryTable), collapse=", "))
+
+# Find max fold changes per gene
 maxFCs <- allResults %>%
   dplyr::group_by(!!sym(biomart_filter)) %>%
   dplyr::filter(abs(linearFoldChange) == max(abs(linearFoldChange))) %>%
   dplyr::ungroup()
 
 if (Platform == "RNA-Seq") {
-	maxFCs <- maxFCs %>%
-		dplyr::select(!!sym(biomart_filter), linearFoldChange)
+  maxFCs <- maxFCs %>%
+    dplyr::select(!!sym(biomart_filter), linearFoldChange)
 } else if (Platform == "TempO-Seq") {
-	maxFCs <- maxFCs %>%
-		dplyr::select(!!sym(biomart_filter), PROBE, linearFoldChange)
+  maxFCs <- maxFCs %>%
+    dplyr::select(!!sym(biomart_filter), PROBE, linearFoldChange)
 }
 
+# Find min p-values per gene
 minPvals <- allResults %>%
-  group_by(!!sym(biomart_filter)) %>%
+  dplyr::group_by(!!sym(biomart_filter)) %>%
   dplyr::filter(padj == min(padj)) %>%
   dplyr::ungroup()
 
 if (Platform == "RNA-Seq") {
-	minPvals <- minPvals %>%
-		dplyr::select(!!sym(biomart_filter), padj)
+  minPvals <- minPvals %>%
+    dplyr::select(!!sym(biomart_filter), padj)
 } else if (Platform == "TempO-Seq") {
-	minPvals <- minPvals %>%
-		dplyr::select(!!sym(biomart_filter), PROBE, padj)
+  minPvals <- minPvals %>%
+    dplyr::select(!!sym(biomart_filter), PROBE, padj)
 }
 
+# Add annotations and max/min values to summary table
 summaryTable <- summaryTable %>%
-  left_join(id_table) %>%
-  left_join(maxFCs) %>%
-  left_join(minPvals) %>%
-  dplyr::rename(maxFoldChange = linearFoldChange,
-         minFDR_pval = padj) %>%
+  dplyr::left_join(id_table) %>%
+  dplyr::left_join(maxFCs) %>%
+  dplyr::left_join(minPvals) %>%
+  dplyr::rename(
+    maxFoldChange = linearFoldChange,
+    minFDR_pval = padj
+  ) %>%
   dplyr::distinct() %>%
-  mutate(maxFoldChange = abs(maxFoldChange)) # This eliminates the direction of change: this way it's easy to sort.
+  dplyr::mutate(maxFoldChange = abs(maxFoldChange)) # Use absolute value for easier sorting
 
-numColsToPrepend <- ncol(summaryTable) - 3*length(resList) - 2 # Number of columns per contrast = 3. Subtract two for the baseMean and genes columns.
+# Reorder columns for better readability
+numColsToPrepend <- ncol(summaryTable) - 3*length(resList) - 2 
 colPositionsToPrependSTART <- ncol(summaryTable) - numColsToPrepend + 1
 colPositionsOfData <- ncol(summaryTable) - numColsToPrepend
-summaryTable <- summaryTable[, c(1,
-                                colPositionsToPrependSTART:ncol(summaryTable),
-                                2:colPositionsOfData)]
-summaryTable <- summaryTable %>% dplyr::distinct() # Just in case duplicates snuck by
 
-CPMddsDF <- data.frame(genes = row.names(CPMdds), CPMdds, check.names = F)
+summaryTable <- summaryTable[, c(
+  1,
+  colPositionsToPrependSTART:ncol(summaryTable),
+  2:colPositionsOfData
+)]
+
+summaryTable <- summaryTable %>% dplyr::distinct() # Remove any duplicates
+
+# Process CPM data
+CPMddsDF <- data.frame(genes = row.names(CPMdds), CPMdds, check.names = FALSE)
+
 if (Platform == "RNA-Seq") {
-	CPMddsDF <- dplyr::left_join(CPMddsDF, id_table, by = c("genes" = biomart_filter))
+  CPMddsDF <- dplyr::left_join(CPMddsDF, id_table, by = c("genes" = biomart_filter))
 } else if (Platform == "TempO-Seq") {
-	CPMddsDF <- dplyr::left_join(CPMddsDF, id_table, by = c("genes" = "PROBE"))
+  CPMddsDF <- dplyr::left_join(CPMddsDF, id_table, by = c("genes" = "PROBE"))
 }
+
+# Reorder columns for better readability
 numColsToPrepend <- ncol(CPMddsDF) - ncol(CPMdds) - 1
 colPositionsToPrependSTART <- ncol(CPMddsDF) - numColsToPrepend + 1
 colPositionsOfData <- ncol(CPMddsDF) - numColsToPrepend
-CPMddsDF <- CPMddsDF[, c(1, colPositionsToPrependSTART:ncol(CPMddsDF), 2:colPositionsOfData)]
 
+CPMddsDF <- CPMddsDF[, c(
+  1, 
+  colPositionsToPrependSTART:ncol(CPMddsDF), 
+  2:colPositionsOfData
+)]
 
 ```
 
@@ -2331,12 +2407,7 @@ This plot shows the first two principal components that explain the variability 
 ## DEGs only (`r length(unique(significantResults[[biomart_filter]]))` genes)
 
 ```{r 'PCA_DEGs', fig.width=10, fig.height=8, eval = rlogTransformPossible & anyDEGs}
-# Ensure significantResults is not empty
-#if (length(unique(significantResults[[biomart_filter]])) == 0) {
-#  stop("No significant results found.")
-#}
-
-# Subset the rld object
+# Extract DEGs from the rld object based on platform
 if (Platform == "RNA-Seq") {
   if (species == "fatheadminnow") {
     rld_degs <- rld[row.names(assay(rld)) %in% significantResults[[species_gene_symbol]],]
@@ -2347,30 +2418,40 @@ if (Platform == "RNA-Seq") {
 	rld_degs <- rld[row.names(assay(rld)) %in% significantResults[["PROBE"]],]
 }
 
-
 # Print dimensions of rld_degs
 print(paste("Dimensions of rld_degs:", dim(rld_degs)))
 
-# Check if rld_degs has non-zero dimensions
-if (nrow(rld_degs) == 0 || ncol(rld_degs) == 0) {
-  stop("rld_degs has zero rows or columns. Check your significantResults and rld object.")
+# Check if there are enough DEGs for PCA (need at least 3 for meaningful analysis)
+if (nrow(rld_degs) >= 3) {
+  ## Perform PCA analysis and make plot
+  gg_PCA_sig_genes <- plotPCA(rld_degs, intgroup = params$design, ntop = nrow(rld_degs)) +
+    theme(legend.position = "bottom") +
+    guides(color = guide_legend(ncol = 3))
+  
+  # Save the plot
+  ggsave(gg_PCA_sig_genes, file = normalizePath(file.path(paths$DEG_output, "plots", "PCA_sig_genes.pdf")))
+  
+  # Perform PCA and get the data
+  PCAplotDEGs <- plotPCA(rld_degs, intgroup = params$design, ntop = nrow(rld_degs), returnData = TRUE)
+  
+  ## Get percent of variance explained
+  percentVarDEGs <- round(100 * attr(PCAplotDEGs, "percentVar"))
+  print(paste("PCA 1 =", percentVarDEGs[1]))
+  print(paste("PCA 2 =", percentVarDEGs[2]))
+} else {
+  # Not enough DEGs for PCA
+  message_text <- paste("Only", nrow(rld_degs), "DEG(s) found. At least 3 are required for meaningful PCA.")
+  print(message_text)
+  
+  # Create a simple message plot instead of PCA
+  gg_PCA_sig_genes <- ggplot() +
+    annotate("text", x = 0.5, y = 0.5, label = message_text, size = 6) +
+    theme_void() +
+    xlim(0, 1) + ylim(0, 1)
+  
+  # Save the message plot
+  ggsave(gg_PCA_sig_genes, file = normalizePath(file.path(paths$DEG_output, "plots", "PCA_sig_genes.pdf")))
 }
-
-## Perform PCA analysis and make plot
-gg_PCA_sig_genes <- plotPCA(rld_degs, intgroup = params$design, ntop = nrow(rld_degs)) +
-  theme(legend.position = "bottom") +
-  guides(color = guide_legend(ncol = 3))
-
-# Save the plot
-ggsave(gg_PCA_sig_genes, file = normalizePath(file.path(paths$DEG_output, "plots", "PCA_sig_genes.pdf")))
-
-# Perform PCA and get the data
-PCAplotDEGs <- plotPCA(rld_degs, intgroup = params$design, ntop = nrow(rld_degs), returnData = TRUE)
-
-## Get percent of variance explained
-percentVarDEGs <- round(100 * attr(PCAplotDEGs, "percentVar"))
-print(paste("PCA 1 =", percentVarDEGs[1]))
-print(paste("PCA 2 =", percentVarDEGs[2]))
 ```
 
 ```{r 'PCA_DEGs_image', fig.width=10, fig.height=8, out.width='100%', out.height='100%', eval = rlogTransformPossible & anyDEGs}
@@ -2547,137 +2628,180 @@ This plot shows how samples are clustered based on their euclidean distance usin
 ## All `r length(unique(significantResults[[biomart_filter]]))` DEGs
 
 ```{r 'heatmap_all_DEGs', collapse = TRUE, eval = rlogTransformPossible & anyDEGs}
+# Define minimum required DEGs for a meaningful heatmap
+min_degs_required <- 2
 
+# Get number of available DEGs
 if (Platform == "RNA-Seq") {
   if (species == "fatheadminnow") {
-    	mat <- assay(rld)[row.names(assay(rld)) %in%
-                                          significantResults[[species_gene_symbol]],]
+    available_degs <- sum(row.names(assay(rld)) %in% significantResults[[species_gene_symbol]])
   } else {
-    	mat <- assay(rld)[row.names(assay(rld)) %in%
-                                          significantResults[[biomart_filter]],]
+    available_degs <- sum(row.names(assay(rld)) %in% significantResults[[biomart_filter]])
   }
 } else if (Platform == "TempO-Seq") {
-	mat <- assay(rld)[row.names(assay(rld)) %in%
-                                          significantResults[["PROBE"]],]
+  available_degs <- sum(row.names(assay(rld)) %in% significantResults[["PROBE"]])
 }
 
-mat <- mat - rowMeans(mat)
+# Skip heatmap if there aren't enough DEGs
+if (available_degs < min_degs_required) {
+  message("Skipping All DEGs heatmap - at least ", min_degs_required, 
+          " DEGs are required for a meaningful visualization. Only ", 
+          available_degs, " DEG(s) available.")
+} else {
+  # Proceed with heatmap creation
+  if (Platform == "RNA-Seq") {
+    if (species == "fatheadminnow") {
+      mat <- assay(rld)[row.names(assay(rld)) %in% significantResults[[species_gene_symbol]],]
+    } else {
+      mat <- assay(rld)[row.names(assay(rld)) %in% significantResults[[biomart_filter]],]
+    }
+  } else if (Platform == "TempO-Seq") {
+    mat <- assay(rld)[row.names(assay(rld)) %in% significantResults[["PROBE"]],]
+  }
 
-heatmap_df <- as.data.frame(colData(rld)[, intgroup, drop = F])
-row.names(heatmap_df) <- colData(rld)$original_names # Customize!
-pheatmap(mat,
-         annotation_col = heatmap_df,
-         show_rownames = FALSE,
-         border_color = NA,
-         scale = "row",
-         filename = normalizePath(file.path(paths$DEG_output, "plots", "Heatmap_norm_counts_vs._logFC_sig_genes.pdf")))
+  mat <- mat - rowMeans(mat)
+  
+  heatmap_df <- as.data.frame(colData(rld)[, intgroup, drop = F])
+  row.names(heatmap_df) <- colData(rld)$original_names # Customize!
+  pheatmap(mat,
+           annotation_col = heatmap_df,
+           show_rownames = FALSE,
+           border_color = NA,
+           scale = "row",
+           filename = normalizePath(file.path(paths$DEG_output, "plots", "Heatmap_norm_counts_vs._logFC_sig_genes.pdf")))
+}
 ```
 
 ```{r 'heatmap_all_DEGs_image', fig.width=10, fig.height=8, out.width='100%', out.height='100%', eval = rlogTransformPossible & anyDEGs}
-#knitr::include_graphics(path = normalizePath(file.path(paths$DEG_output, "plots", "Heatmap_norm_counts_vs._logFC_sig_genes.pdf")), error = FALSE, rel_path = FALSE, out.width='100%', out.height='100%')
-# color = inferno(10)
-pheatmap(mat,
-         annotation_col = heatmap_df,
-         show_rownames = FALSE,
-         border_color = NA,
-         scale = "row")
+# Only render the plot in the report if we have enough DEGs
+if (exists("available_degs") && available_degs >= min_degs_required) {
+  pheatmap(mat,
+           annotation_col = heatmap_df,
+           show_rownames = FALSE,
+           border_color = NA,
+           scale = "row")
+} else {
+  cat("Heatmap skipped: Insufficient DEGs for meaningful visualization")
+}
 ```
 
 ## Top `r nHeatmapDEGs` differentially abundant genes
 
 ```{r 'heatmap_top_degs', collapse = TRUE, eval = rlogTransformPossible & anyDEGs}
 
-if (Platform == "RNA-Seq") {
-  if (species == "fatheadminnow") {
-    mat_top <- assay(rld)[row.names(assay(rld)) %in% allResultsOrdered_logFC_filter[1:nHeatmapDEGs,][[species_gene_symbol]],]
-	  mat_top <- mat_top - rowMeans(mat_top)
-	  genes_for_heatmap <- data.frame(genes = row.names(mat_top))
-	  names(genes_for_heatmap)[names(genes_for_heatmap) == "genes"] <- species_gene_symbol
-	  genes_for_heatmap <- dplyr::left_join(genes_for_heatmap,
-                                      id_table,
-                                      by = species_gene_symbol) %>%
-  		dplyr::select(!!ensym(biomart_filter), !!ensym(species_gene_symbol)) %>%
-  		dplyr::distinct() %>%
-  		dplyr::group_by(!!ensym(biomart_filter)) %>%
-  		dplyr::mutate(combined = paste0(!!ensym(species_gene_symbol), collapse = ", ")) %>%
-  		dplyr::select(-!!ensym(species_gene_symbol)) %>%
-  		dplyr::distinct()
-	  names(genes_for_heatmap)[names(genes_for_heatmap) == "combined"] <- species_gene_symbol
-	  genes_for_heatmap[[species_gene_symbol]] <- ifelse(is.na(genes_for_heatmap[[species_gene_symbol]]),
-               genes_for_heatmap[[biomart_filter]],
-               genes_for_heatmap[[species_gene_symbol]])
+# Define minimum required DEGs for a meaningful heatmap
+min_degs_required <- 2
 
-	  genes_for_heatmap[[species_gene_symbol]] <- ifelse(genes_for_heatmap[[species_gene_symbol]] == "",
-               genes_for_heatmap[[biomart_filter]],
-               genes_for_heatmap[[species_gene_symbol]])
-  } else {
-    mat_top <- assay(rld)[row.names(assay(rld)) %in% allResultsOrdered_logFC_filter[1:nHeatmapDEGs,][[biomart_filter]],]
-	  mat_top <- mat_top - rowMeans(mat_top)
-	  genes_for_heatmap <- data.frame(genes = row.names(mat_top))
-	  names(genes_for_heatmap)[names(genes_for_heatmap) == "genes"] <- biomart_filter
-	  genes_for_heatmap <- dplyr::left_join(genes_for_heatmap,
+heatmap_df <- as.data.frame(colData(rld)[, intgroup, drop = F])
+row.names(heatmap_df) <- colData(rld)$original_names # Customize!
+
+# Determine how many DEGs to display
+num_available_degs <- nrow(allResultsOrdered_logFC_filter)
+actual_num_heatmap_degs <- min(nHeatmapDEGs, num_available_degs)
+
+# Skip heatmap if there aren't enough DEGs
+if (actual_num_heatmap_degs < min_degs_required) {
+  message("Skipping Top DEGs heatmap - at least ", min_degs_required, 
+          " DEGs are required for a meaningful visualization. Only ", 
+          num_available_degs, " DEG(s) available.")
+} else {
+  # Proceed with heatmap creation
+  if (Platform == "RNA-Seq") {
+    if (species == "fatheadminnow") {
+      mat_top <- assay(rld)[row.names(assay(rld)) %in% allResultsOrdered_logFC_filter[1:actual_num_heatmap_degs,][[species_gene_symbol]],]
+      mat_top <- mat_top - rowMeans(mat_top)
+      genes_for_heatmap <- data.frame(genes = row.names(mat_top))
+      names(genes_for_heatmap)[names(genes_for_heatmap) == "genes"] <- species_gene_symbol
+      genes_for_heatmap <- dplyr::left_join(genes_for_heatmap,
+                                        id_table,
+                                        by = species_gene_symbol) %>%
+        dplyr::select(!!ensym(biomart_filter), !!ensym(species_gene_symbol)) %>%
+        dplyr::distinct() %>%
+        dplyr::group_by(!!ensym(biomart_filter)) %>%
+        dplyr::mutate(combined = paste0(!!ensym(species_gene_symbol), collapse = ", ")) %>%
+        dplyr::select(-!!ensym(species_gene_symbol)) %>%
+        dplyr::distinct()
+      names(genes_for_heatmap)[names(genes_for_heatmap) == "combined"] <- species_gene_symbol
+      genes_for_heatmap[[species_gene_symbol]] <- ifelse(is.na(genes_for_heatmap[[species_gene_symbol]]),
+                 genes_for_heatmap[[biomart_filter]],
+                 genes_for_heatmap[[species_gene_symbol]])
+
+      genes_for_heatmap[[species_gene_symbol]] <- ifelse(genes_for_heatmap[[species_gene_symbol]] == "",
+                 genes_for_heatmap[[biomart_filter]],
+                 genes_for_heatmap[[species_gene_symbol]])
+    } else {
+      mat_top <- assay(rld)[row.names(assay(rld)) %in% allResultsOrdered_logFC_filter[1:actual_num_heatmap_degs,][[biomart_filter]],]
+      mat_top <- mat_top - rowMeans(mat_top)
+      genes_for_heatmap <- data.frame(genes = row.names(mat_top))
+      names(genes_for_heatmap)[names(genes_for_heatmap) == "genes"] <- biomart_filter
+      genes_for_heatmap <- dplyr::left_join(genes_for_heatmap,
                                       id_table_entrez,
                                       by = biomart_filter) %>%
-  		dplyr::select(!!ensym(biomart_filter), !!ensym(species_gene_symbol)) %>%
-  		dplyr::distinct() %>%
-  		dplyr::group_by(!!ensym(biomart_filter)) %>%
-  		dplyr::mutate(combined = paste0(!!ensym(species_gene_symbol), collapse = ", ")) %>%
-  		dplyr::select(-!!ensym(species_gene_symbol)) %>%
-  		dplyr::distinct()
-	  names(genes_for_heatmap)[names(genes_for_heatmap) == "combined"] <- species_gene_symbol
-	  genes_for_heatmap[[species_gene_symbol]] <- ifelse(is.na(genes_for_heatmap[[species_gene_symbol]]),
-               genes_for_heatmap[[biomart_filter]],
-               genes_for_heatmap[[species_gene_symbol]])
+        dplyr::select(!!ensym(biomart_filter), !!ensym(species_gene_symbol)) %>%
+        dplyr::distinct() %>%
+        dplyr::group_by(!!ensym(biomart_filter)) %>%
+        dplyr::mutate(combined = paste0(!!ensym(species_gene_symbol), collapse = ", ")) %>%
+        dplyr::select(-!!ensym(species_gene_symbol)) %>%
+        dplyr::distinct()
+      names(genes_for_heatmap)[names(genes_for_heatmap) == "combined"] <- species_gene_symbol
+      genes_for_heatmap[[species_gene_symbol]] <- ifelse(is.na(genes_for_heatmap[[species_gene_symbol]]),
+                 genes_for_heatmap[[biomart_filter]],
+                 genes_for_heatmap[[species_gene_symbol]])
 
-	  genes_for_heatmap[[species_gene_symbol]] <- ifelse(genes_for_heatmap[[species_gene_symbol]] == "",
-               genes_for_heatmap[[biomart_filter]],
-               genes_for_heatmap[[species_gene_symbol]])
-  }
-} else if (Platform == "TempO-Seq") {
-	mat_top <- assay(rld)[row.names(assay(rld)) %in% allResultsOrdered_logFC_filter[1:nHeatmapDEGs,][["PROBE"]],]
-	mat_top <- mat_top - rowMeans(mat_top)
-	genes_for_heatmap <- data.frame(genes = row.names(mat_top))
-	names(genes_for_heatmap)[names(genes_for_heatmap) == "genes"] <- "PROBE"
-	genes_for_heatmap <- dplyr::left_join(genes_for_heatmap,
+      genes_for_heatmap[[species_gene_symbol]] <- ifelse(genes_for_heatmap[[species_gene_symbol]] == "",
+                 genes_for_heatmap[[biomart_filter]],
+                 genes_for_heatmap[[species_gene_symbol]])
+    }
+  } else if (Platform == "TempO-Seq") {
+    mat_top <- assay(rld)[row.names(assay(rld)) %in% allResultsOrdered_logFC_filter[1:actual_num_heatmap_degs,][["PROBE"]],]
+    mat_top <- mat_top - rowMeans(mat_top)
+    genes_for_heatmap <- data.frame(genes = row.names(mat_top))
+    names(genes_for_heatmap)[names(genes_for_heatmap) == "genes"] <- "PROBE"
+    genes_for_heatmap <- dplyr::left_join(genes_for_heatmap,
                                       id_table_entrez,
                                       by = "PROBE") %>%
-  		dplyr::select(!!ensym(biomart_filter), !!ensym(species_gene_symbol), PROBE) %>%
-  		dplyr::distinct() %>%
-  		dplyr::group_by(PROBE) %>%
-  		dplyr::mutate(combined = paste0(!!ensym(species_gene_symbol), collapse = ", ")) %>%
-  		dplyr::select(-!!ensym(species_gene_symbol)) %>%
-  		dplyr::distinct()
-	names(genes_for_heatmap)[names(genes_for_heatmap) == "combined"] <- species_gene_symbol
-	genes_for_heatmap[[species_gene_symbol]] <- ifelse(is.na(genes_for_heatmap[[species_gene_symbol]]),
-               genes_for_heatmap[["PROBE"]],
-               genes_for_heatmap[[species_gene_symbol]])
+        dplyr::select(!!ensym(biomart_filter), !!ensym(species_gene_symbol), PROBE) %>%
+        dplyr::distinct() %>%
+        dplyr::group_by(PROBE) %>%
+        dplyr::mutate(combined = paste0(!!ensym(species_gene_symbol), collapse = ", ")) %>%
+        dplyr::select(-!!ensym(species_gene_symbol)) %>%
+        dplyr::distinct()
+    names(genes_for_heatmap)[names(genes_for_heatmap) == "combined"] <- species_gene_symbol
+    genes_for_heatmap[[species_gene_symbol]] <- ifelse(is.na(genes_for_heatmap[[species_gene_symbol]]),
+                 genes_for_heatmap[["PROBE"]],
+                 genes_for_heatmap[[species_gene_symbol]])
 
-	genes_for_heatmap[[species_gene_symbol]] <- ifelse(genes_for_heatmap[[species_gene_symbol]] == "",
-               genes_for_heatmap[["PROBE"]],
-               genes_for_heatmap[[species_gene_symbol]])
+    genes_for_heatmap[[species_gene_symbol]] <- ifelse(genes_for_heatmap[[species_gene_symbol]] == "",
+                 genes_for_heatmap[["PROBE"]],
+                 genes_for_heatmap[[species_gene_symbol]])
+  }
+
+  genes_for_heatmap <- genes_for_heatmap %>% dplyr::pull(species_gene_symbol)
+
+  pheatmap(mat_top,
+           annotation_col = heatmap_df,
+           labels_row = genes_for_heatmap,
+           show_rownames = TRUE,
+           border_color = NA,
+           scale = "row",
+           filename = normalizePath(file.path(paths$DEG_output, "plots", "Heatmap_norm_counts_vs._logFC_top_genes_byFC.pdf")))
+  color = inferno(10)
 }
-
-genes_for_heatmap <- genes_for_heatmap %>% pull(species_gene_symbol)
-
-pheatmap(mat_top,
-         annotation_col = heatmap_df,
-         labels_row = genes_for_heatmap,
-         show_rownames = TRUE,
-         border_color = NA,
-         scale = "row",
-         filename = normalizePath(file.path(paths$DEG_output, "plots", "Heatmap_norm_counts_vs._logFC_top_genes_byFC.pdf")))
-color = inferno(10)
 ```
 
 ```{r 'heatmap_top_degs_image', fig.width=10, fig.height=8, out.width='100%', out.height='100%', eval = rlogTransformPossible & anyDEGs}
-#knitr::include_graphics(path = normalizePath(file.path(paths$DEG_output, "plots", "Heatmap_norm_counts_vs._logFC_top_genes_byFC.pdf")), error = FALSE, rel_path = FALSE, out.width='100%', out.height='100%')
-pheatmap(mat_top,
-         annotation_col = heatmap_df,
-         labels_row = genes_for_heatmap,
-         show_rownames = TRUE,
-         border_color = NA,
-         scale = "row")
-color = inferno(10)
+# Only render the plot in the report if we have enough DEGs
+if (exists("actual_num_heatmap_degs") && actual_num_heatmap_degs >= min_degs_required) {
+  pheatmap(mat_top,
+           annotation_col = heatmap_df,
+           labels_row = genes_for_heatmap,
+           show_rownames = TRUE,
+           border_color = NA,
+           scale = "row")
+  color = inferno(10)
+} else {
+  cat("Heatmap skipped: Insufficient DEGs for meaningful visualization")
+}
 ```
 
 ## Top `r nHeatmap` variable genes
@@ -2750,7 +2874,7 @@ if (Platform == "RNA-Seq") {
                genes_for_heatmap[[species_gene_symbol]])
 }
 
-genes_for_heatmap <- genes_for_heatmap %>% pull(species_gene_symbol)
+genes_for_heatmap <- genes_for_heatmap %>% dplyr::pull(species_gene_symbol)
 
 pheatmap(matRV,
          #color = rev(brewer.pal(11, "RdBu")), # inferno(10),
@@ -2997,7 +3121,7 @@ This section contains plots showing the normalized counts per sample for each gr
 
 if (Platform == "TempO-Seq") {
 	id_table <- id_table %>%
-  		mutate(!!sym(biomart_filter) := if_else(is.na(!!sym(biomart_filter)) & is.na(!!sym(species_gene_symbol)), PROBE, !!sym(biomart_filter)))
+  		dplyr::mutate(!!sym(biomart_filter) := if_else(is.na(!!sym(biomart_filter)) & is.na(!!sym(species_gene_symbol)), PROBE, !!sym(biomart_filter)))
 }
 
 plotCounts_gg <- function(i, dds, intgroup) {
@@ -3020,7 +3144,7 @@ plotCounts_gg <- function(i, dds, intgroup) {
       labs(color = colnames(plotdata)[colorCol])
 }
 
-genesToPlot <- significantResults %>% arrange(-abs(log2FoldChange))
+genesToPlot <- significantResults %>% dplyr::arrange(-abs(log2FoldChange))
 
 if (Platform == "RNA-Seq") {
   if (species == "fatheadminnow") {
@@ -3116,10 +3240,10 @@ This section shows genes of interest sorted by those with highest fold-change wi
 numResults <- nBestFeatures
 
 gg_genes_of_interest <- allResultsOrdered_logFC_filter %>%
-  group_by(contrast) %>%
+  dplyr::group_by(contrast) %>%
   top_n(numResults, wt = abs(log2FoldChange)) %>%
   ungroup() %>%
-  mutate(contrast = as.factor(contrast),
+  dplyr::mutate(contrast = as.factor(contrast),
          symbol = reorder_within(!!ensym(species_gene_symbol), log2FoldChange, contrast)) %>%
   ggplot(aes(x = log2FoldChange,
              y = symbol,

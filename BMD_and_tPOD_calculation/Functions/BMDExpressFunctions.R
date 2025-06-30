@@ -7,11 +7,29 @@ BMDfiltering <- function(x,
                          BMDU.div.BMD = 20,
                          lowdose,
                          highdose,
-                         fitP = 0.1) {
+                         fitP = 0.1,
+                         filter_low = TRUE,
+                         filter_high = TRUE,
+                         no_filtering = FALSE) {  # Add this parameter
   results <- list()
   
   results$initial <- x
   
+  # If no_filtering is TRUE, skip all filtering
+  if(no_filtering) {
+    # Store the unfiltered data in all result components
+    results$filter_BMD_BMDL <- x
+    results$filter_BMDU_BMDL <- x
+    results$filter_BMDU_BMD <- x
+    results$filter_lowdose <- x
+    results$filter_highdose <- x
+    results$filter_fitP <- x
+    results$final <- x
+    
+    return(results)
+  }
+  
+  # Only perform filtering operations if no_filtering is FALSE
   results$filter_BMD_BMDL <- x %>%
     dplyr::filter((BMD / BMDL) < BMD.div.BMDL)
   
@@ -21,22 +39,42 @@ BMDfiltering <- function(x,
   results$filter_BMDU_BMD <- x %>%
     dplyr::filter((BMDU / BMD) < BMDU.div.BMD)
   
-  results$filter_lowdose <- x %>%
-    dplyr::filter(BMD >= (lowdose / 10))
+  if(filter_low) {
+    results$filter_lowdose <- x %>%
+      dplyr::filter(BMD >= (lowdose / 10))
+  } else {
+    results$filter_lowdose <- x
+  }
   
-  results$filter_highdose <- x %>%
-    dplyr::filter(BMD <= highdose)
+  if(filter_high){
+    results$filter_highdose <- x %>%
+      dplyr::filter(BMD <= highdose)
+  } else {
+    results$filter_highdose <- x
+  }
   
   results$filter_fitP <- x %>%
     dplyr::filter(fitPValue >= fitP)
   
-  results$final <- x %>%
+  # Start with base filters
+  filtered_data <- x %>%
     dplyr::filter((BMD / BMDL) < BMD.div.BMDL) %>%
     dplyr::filter((BMDU / BMDL) < BMDU.div.BMDL) %>%
     dplyr::filter((BMDU / BMD) < BMDU.div.BMD) %>%
-    dplyr::filter(BMD >= (lowdose / 10)) %>%
-    dplyr::filter(BMD <= highdose) %>%
     dplyr::filter(fitPValue >= fitP)
+  
+  # Conditionally apply dose filters
+  if(filter_low) {
+    filtered_data <- filtered_data %>%
+      dplyr::filter(BMD >= (lowdose / 10))
+  }
+  
+  if(filter_high) {
+    filtered_data <- filtered_data %>%
+      dplyr::filter(BMD <= highdose)
+  }
+  
+  results$final <- filtered_data
   
   return(results)
 }

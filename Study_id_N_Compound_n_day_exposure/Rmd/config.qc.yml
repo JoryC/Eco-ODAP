@@ -2,12 +2,13 @@
 params:
   projectdir: !expr paste0("/mnt/", Sys.getenv("STUDY_ID_DIR"))
   project_name: !expr Sys.getenv("STUDY_ID_DIR")
+  countmatdir: !expr paste0("/mnt/", Sys.getenv("STUDY_ID_DIR"), "/output/", Sys.getenv("ALIGN_QUANT_METHOD"))
   clust_method: "spearman" # For clustering
   tree_height_cutoff: 0.1 # For clustering
   dendro_color_by: "Dose" # Specify how you would like to color the dendrograms
-  nmr_threshold: 3000000 # 10% of 1M reads for TempOSeq = 100,000; 10% of 10M reads for RNA-Seq = 1,000,000.
+  nmr_threshold: 25 # 10% of 1M reads for TempOSeq = 100,000; 10% of 10M reads for RNA-Seq = 1,000,000.
   align_threshold: 0.7 # 50% alignment rate for Targeted-RNAseq Experiments, 70% for RNA-seq
-  gini_cutoff: 0.95 # If dataset has no replicates, set gini to 1... DEFAULT TO (0.99)
+  gini_cutoff: 0.99 # If dataset has no replicates, set gini to 1... DEFAULT TO (0.99)
   q30_cutoff: 0.7 # Discard samples if % of Q scores ≥ 30 was less than 70% by default
   forward_reverse_q30_diff_cutoff: 0.25 # Discard samples if the difference in the q30_percentage is greater than 0.25 by default. This is not necessary for single reads.
   PCA_cutoff: 0.2 # Default is 20%. Sample not clustering with their dose replicates (>20% variance) are removed
