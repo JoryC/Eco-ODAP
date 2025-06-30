@@ -301,6 +301,7 @@ DESeqDesign$original_names <-
   DESeqDesign[, 1] #This assumes the Run name is in the first column
 DESeqDesign <-
   DESeqDesign[DESeqDesign$original_names %in% temp_samplenames,] #Filtering the DESeqDesign to just be the samples in this dataset... useful for metadata containing data from multiple experiments/study ids
+DESeqDesign$Compound <- gsub(" ", "", DESeqDesign$Compound) #Removing spaces that may have been in the metadata which can screw up this filtering process...
 DESeqDesign <- 
    DESeqDesign[DESeqDesign$Compound == chemical_name, ] #Filtering the DESeqDesign by chemical name present in the project directory name
 

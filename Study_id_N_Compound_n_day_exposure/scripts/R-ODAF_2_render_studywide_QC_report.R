@@ -1,4 +1,4 @@
-#!/root/.conda/envs/updated_my_r_pkgs/bin/R
+#!/opt/miniconda3/envs/updated_my_r_pkgs/bin/R
 # Custom parameters for the report
 library(tidyverse)
 require(yaml)

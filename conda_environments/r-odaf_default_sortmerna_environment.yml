@@ -1,0 +1,9 @@
+name: sortmerna
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+  - https://repo.anaconda.com/pkgs/main
+  - https://repo.anaconda.com/pkgs/r
+dependencies:
+  - sortmerna=4.3.6=h9ee0642_0

@@ -1,0 +1,22 @@
+name: ucsc-gtf2bed
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+  - https://repo.anaconda.com/pkgs/main
+  - https://repo.anaconda.com/pkgs/r
+dependencies:
+  - _libgcc_mutex=0.1=main
+  - _openmp_mutex=5.1=1_gnu
+  - ca-certificates=2025.2.25=h06a4308_0
+  - libgcc=7.2.0=h69d50b8_2
+  - libgcc-ng=11.2.0=h1234567_1
+  - libgomp=11.2.0=h1234567_1
+  - libpng=1.6.39=h5eee18b_0
+  - libstdcxx-ng=11.2.0=h1234567_1
+  - libuuid=1.41.5=h5eee18b_0
+  - mysql-connector-c=6.1.6=2
+  - openssl=1.0.2u=h7b6447c_0
+  - ucsc-genepredtobed=366=h5eb252a_0
+  - ucsc-gtftogenepred=366=h5eb252a_0
+  - zlib=1.2.13=h5eee18b_1

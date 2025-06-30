@@ -1,4 +1,4 @@
-#!/root/.conda/envs/DESeq2_report_env/bin/R
+#!/opt/miniconda3/envs/DESeq2_report_env/bin/R
 # Custom parameters for the report
 library(tidyverse)
 require(yaml)
